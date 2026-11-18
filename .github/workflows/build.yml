@@ -132,6 +132,8 @@ jobs:
         run: |
           sudo mkdir -p /run/sshd
           sudo chmod 0755 /run/sshd
+          sudo mkdir -p /data/data/com.termux/files/usr/tmp
+          sudo chown -R "$(id -u):$(id -g)" /data/data/com.termux
           cargo test -p waypane-core --locked --test upstream_ssh -- --ignored --nocapture
 
   android:

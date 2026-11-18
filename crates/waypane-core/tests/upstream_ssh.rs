@@ -40,8 +40,15 @@ impl TestSshd {
         generate_key(&user_key, KEY_PASSPHRASE)?;
         fs::copy(root.join("id_ed25519.pub"), root.join("authorized_keys"))
             .map_err(|error| error.to_string())?;
-        let termux_tmp = root.join("data/data/com.termux/files/usr/tmp");
-        fs::create_dir_all(&termux_tmp).map_err(|error| error.to_string())?;
+        let termux_tmp = PathBuf::from("/data/data/com.termux/files/usr/tmp");
+        let probe = termux_tmp.join(format!("waypane-write-probe-{}", std::process::id()));
+        fs::write(&probe, b"").map_err(|error| {
+            format!(
+                "Termux test TMPDIR {} must exist and be writable: {error}",
+                termux_tmp.display()
+            )
+        })?;
+        let _ = fs::remove_file(probe);
 
         let listener =
             std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|error| error.to_string())?;
