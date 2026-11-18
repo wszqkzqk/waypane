@@ -235,6 +235,42 @@ fn watch_remote_command(mut channel: Channel<Msg>) -> mpsc::Receiver<CommandEven
 }
 
 #[cfg(unix)]
-pub async fn connect_local(path: impl AsRef<Path>) -> Result<tokio::net::UnixStream> {
-    Ok(tokio::net::UnixStream::connect(path).await?)
+pub struct LocalListener {
+    listener: tokio::net::UnixListener,
+    path: PathBuf,
+}
+
+#[cfg(unix)]
+impl LocalListener {
+    pub fn bind(path: impl Into<PathBuf>) -> Result<Self> {
+        use std::os::unix::fs::FileTypeExt;
+
+        let path = path.into();
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_socket() => {
+                std::fs::remove_file(&path)?;
+            }
+            Ok(_) => {
+                return Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("refusing to replace non-socket path {}", path.display()),
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let listener = tokio::net::UnixListener::bind(&path)?;
+        Ok(Self { listener, path })
+    }
+
+    pub async fn accept(&self) -> Result<tokio::net::UnixStream> {
+        Ok(self.listener.accept().await?.0)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for LocalListener {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }

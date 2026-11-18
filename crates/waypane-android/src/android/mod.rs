@@ -1,0 +1,434 @@
+mod gpu;
+
+use std::fmt;
+use std::path::PathBuf;
+use std::sync::atomic::Ordering;
+
+use gpu::GpuRenderer;
+use jni::objects::{JClass, JObject, JString};
+use jni::sys::{jboolean, jfloat, jint, jlong, jobject};
+use jni::{Env, EnvUnowned};
+use waypane_core::Size;
+use waypane_transport::{Authentication, RemoteWaypipe, SshConfig};
+use waypipe_client::Compression;
+
+use crate::keycodes::android_keycode_to_evdev;
+use crate::{ActorCommand, ActorHandle, SessionId, SurfaceKey};
+
+struct NativeState {
+    gpu: GpuRenderer,
+    actor: ActorHandle,
+}
+
+#[derive(Debug)]
+struct JniError(String);
+
+impl fmt::Display for JniError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for JniError {}
+
+impl From<jni::errors::Error> for JniError {
+    fn from(error: jni::errors::Error) -> Self {
+        Self(error.to_string())
+    }
+}
+
+macro_rules! jni_guard {
+    ($unowned:expr, $jni_env:ident, $ret:ty, $body:expr) => {{
+        $unowned
+            .with_env(|mut $jni_env| -> Result<$ret, JniError> {
+                let _ = &mut $jni_env;
+                let result: Result<$ret, String> = (|| $body)();
+                result.map_err(JniError)
+            })
+            .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+    }};
+}
+
+fn text(env: &mut Env<'_>, value: &JString<'_>) -> Result<String, String> {
+    let value = value
+        .try_to_string(env)
+        .map_err(|error| format!("invalid JNI string: {error}"))?;
+    Ok(value)
+}
+
+fn optional_text(env: &mut Env<'_>, value: &JString<'_>) -> Result<Option<String>, String> {
+    let value = text(env, value)?;
+    Ok((!value.trim().is_empty()).then_some(value))
+}
+
+fn key(session: jlong, window: jint) -> Result<SurfaceKey, String> {
+    let session = SessionId::try_from(session).map_err(|_| "invalid session id".to_string())?;
+    let window = u32::try_from(window).map_err(|_| "invalid window id".to_string())?;
+    Ok(SurfaceKey { session, window })
+}
+
+fn state<'a>(handle: jlong) -> Result<&'a mut NativeState, String> {
+    if handle == 0 {
+        return Err("native handle is closed".to_string());
+    }
+    // SAFETY: NativeBridge keeps the pointer opaque and frees it only in nativeDestroy;
+    // native* methods are called according to NativeBridge's main-thread/surface-thread contract.
+    Ok(unsafe { &mut *(handle as usize as *mut NativeState) })
+}
+
+fn jb(value: bool) -> jboolean {
+    value
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeConnect(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+    host: JString<'_>,
+    port: jint,
+    user: JString<'_>,
+    identity: JString<'_>,
+    password: JString<'_>,
+    known_hosts: JString<'_>,
+    accept_new_host_key: jboolean,
+    compression: JString<'_>,
+    command: JString<'_>,
+) -> jlong {
+    jni_guard!(env, env, jlong, {
+        let host = text(env, &host)?;
+        let user = text(env, &user)?;
+        if host.trim().is_empty() || user.trim().is_empty() {
+            return Err("host and user are required".to_string());
+        }
+        let port = u16::try_from(port).map_err(|_| "invalid SSH port".to_string())?;
+        let command = text(env, &command)?;
+        let command = shlex::split(&command)
+            .filter(|parts| !parts.is_empty())
+            .ok_or_else(|| "remote command contains an unterminated quote".to_string())?;
+        let compression = match text(env, &compression)?.as_str() {
+            "none" => Compression::None,
+            "lz4" => Compression::Lz4,
+            "zstd" => Compression::Zstd,
+            _ => return Err("unsupported compression".to_string()),
+        };
+        let identity = optional_text(env, &identity)?;
+        let password = optional_text(env, &password)?;
+        let authentication = if let Some(password) = password {
+            Authentication::Password(password)
+        } else if let Some(path) = identity {
+            Authentication::PublicKey {
+                path: PathBuf::from(path),
+                passphrase: None,
+            }
+        } else {
+            Authentication::Auto
+        };
+        let known_hosts = optional_text(env, &known_hosts)?.map(PathBuf::from);
+        let remote = RemoteWaypipe::new(compression, command).map_err(|error| error.to_string())?;
+        let state = Box::new(NativeState {
+            gpu: GpuRenderer::default(),
+            actor: ActorHandle::start(
+                SshConfig {
+                    host,
+                    port,
+                    user,
+                    authentication,
+                    known_hosts,
+                    accept_unknown_host_key: accept_new_host_key,
+                },
+                remote,
+            ),
+        });
+        Ok(Box::into_raw(state) as usize as jlong)
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeNextEvent(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+) -> jobject {
+    jni_guard!(env, env, jobject, {
+        let state = state(handle)?;
+        let Some(event) = state.actor.next_event() else {
+            return Ok(JObject::null().into_raw());
+        };
+        let json = serde_json::to_string(&event).map_err(|error| error.to_string())?;
+        let value = env
+            .new_string(json)
+            .map_err(|error| format!("failed to allocate JNI string: {error}"))?;
+        Ok(value.into_raw())
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeAttachSurface(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    session: jlong,
+    window: jint,
+    surface: JObject<'_>,
+    width: jint,
+    height: jint,
+) -> jboolean {
+    jni_guard!(env, env, jboolean, {
+        let key = key(session, window)?;
+        let state = state(handle)?;
+        let width = u32::try_from(width).map_err(|_| "invalid width".to_string())?;
+        let height = u32::try_from(height).map_err(|_| "invalid height".to_string())?;
+        state.gpu.attach(env, key, &surface, width, height)?;
+        Ok(jb(true))
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeResizeSurface(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    session: jlong,
+    window: jint,
+    width: jint,
+    height: jint,
+) {
+    jni_guard!(env, env, (), {
+        let key = key(session, window)?;
+        let width = u32::try_from(width).map_err(|_| "invalid width".to_string())?;
+        let height = u32::try_from(height).map_err(|_| "invalid height".to_string())?;
+        state(handle)?.gpu.resize(key, width, height);
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeRender(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    session: jlong,
+    window: jint,
+) -> jboolean {
+    jni_guard!(env, env, jboolean, {
+        let key = key(session, window)?;
+        let state = state(handle)?;
+        Ok(jb(state.gpu.render(&state.actor, key)))
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeDetachSurface(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    session: jlong,
+    window: jint,
+) {
+    jni_guard!(env, env, (), {
+        state(handle)?.gpu.detach(key(session, window)?);
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeIsDirty(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    session: jlong,
+    window: jint,
+) -> jboolean {
+    jni_guard!(env, env, jboolean, {
+        let key = key(session, window)?;
+        let dirty = state(handle)?
+            .actor
+            .surface(key)
+            .map(|surface| {
+                surface
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .dirty
+                    .load(Ordering::Acquire)
+            })
+            .unwrap_or(false);
+        Ok(jb(dirty))
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeTouch(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    session: jlong,
+    window: jint,
+    pointer: jint,
+    action: jint,
+    x: jfloat,
+    y: jfloat,
+) -> jboolean {
+    jni_guard!(env, env, jboolean, {
+        let key = key(session, window)?;
+        let command = match action {
+            0 => ActorCommand::TouchDown(key, pointer, f64::from(x), f64::from(y)),
+            1 => ActorCommand::TouchMotion(key, pointer, f64::from(x), f64::from(y)),
+            2 => ActorCommand::TouchUp(key, pointer),
+            _ => return Err("unknown touch action".to_string()),
+        };
+        Ok(jb(state(handle)?.actor.send(command)))
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeTouchCancel(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    session: jlong,
+    window: jint,
+) -> jboolean {
+    jni_guard!(env, env, jboolean, {
+        Ok(jb(state(handle)?
+            .actor
+            .send(ActorCommand::TouchCancel(key(session, window)?))))
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_waypane_app_NativeBridge_nativePointer(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    session: jlong,
+    window: jint,
+    x: jfloat,
+    y: jfloat,
+    button: jint,
+    pressed: jboolean,
+) -> jboolean {
+    jni_guard!(env, env, jboolean, {
+        let key = key(session, window)?;
+        let button = (button >= 0).then(|| (u32::try_from(button).unwrap(), pressed));
+        Ok(jb(state(handle)?.actor.send(ActorCommand::Pointer(
+            key,
+            f64::from(x),
+            f64::from(y),
+            button,
+        ))))
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeScroll(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    session: jlong,
+    window: jint,
+    x: jfloat,
+    y: jfloat,
+    horizontal: jfloat,
+    vertical: jfloat,
+) -> jboolean {
+    jni_guard!(env, env, jboolean, {
+        Ok(jb(state(handle)?.actor.send(ActorCommand::Scroll(
+            key(session, window)?,
+            f64::from(x),
+            f64::from(y),
+            f64::from(horizontal),
+            f64::from(vertical),
+        ))))
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeKey(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    session: jlong,
+    window: jint,
+    android_keycode: jint,
+    pressed: jboolean,
+) -> jboolean {
+    jni_guard!(env, env, jboolean, {
+        let Some(code) = android_keycode_to_evdev(android_keycode) else {
+            return Ok(jb(false));
+        };
+        Ok(jb(state(handle)?.actor.send(ActorCommand::Key(
+            key(session, window)?,
+            code,
+            pressed,
+        ))))
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeCloseWindow(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    session: jlong,
+    window: jint,
+) -> jboolean {
+    jni_guard!(env, env, jboolean, {
+        Ok(jb(state(handle)?
+            .actor
+            .send(ActorCommand::CloseWindow(key(session, window)?))))
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeResizeWindow(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    session: jlong,
+    window: jint,
+    width: jint,
+    height: jint,
+) -> jboolean {
+    jni_guard!(env, env, jboolean, {
+        let width = u32::try_from(width).map_err(|_| "invalid width".to_string())?;
+        let height = u32::try_from(height).map_err(|_| "invalid height".to_string())?;
+        Ok(jb(state(handle)?.actor.send(ActorCommand::Resize(
+            key(session, window)?,
+            Size { width, height },
+        ))))
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeDisconnectSession(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    session: jlong,
+) -> jboolean {
+    jni_guard!(env, env, jboolean, {
+        let session = SessionId::try_from(session).map_err(|_| "invalid session id".to_string())?;
+        Ok(jb(state(handle)?
+            .actor
+            .send(ActorCommand::DisconnectSession(session))))
+    })
+}
+
+#[allow(clippy::redundant_closure_call)]
+#[no_mangle]
+pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeDestroy(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+) {
+    jni_guard!(env, env, (), {
+        if handle != 0 {
+            // SAFETY: handle is atomically cleared by Kotlin before calling nativeDestroy once.
+            let state = unsafe { Box::from_raw(handle as usize as *mut NativeState) };
+            state.actor.stop();
+            drop(state.gpu);
+            drop(state.actor);
+        }
+        Ok(())
+    })
+}

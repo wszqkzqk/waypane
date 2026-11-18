@@ -6,3 +6,14 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+env_logger = "0.11"
+log = "0.4"
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread", "sync", "time"] }
+waypane-core = { path = "../../crates/waypane-core" }
+waypane-render = { path = "../../crates/waypane-render" }
+waypane-transport = { path = "../../crates/waypane-transport" }
+waypipe-client = { path = "../../crates/waypipe-client" }
+winit = { version = "0.30", features = ["rwh_06"] }

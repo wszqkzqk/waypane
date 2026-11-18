@@ -218,7 +218,6 @@ impl Compositor {
                 ));
             }
             xdg_surface.configure_serial = Some(serial);
-            xdg_surface.initial_ack_seen = false;
             self.windows[&id].xdg_surface_id
         };
         self.send_configure(id, xdg_surface_id, size, &states, serial);
@@ -566,6 +565,18 @@ impl Compositor {
                     Argument::Fixed(y),
                 ],
             );
+            self.emit(&wl::WL_TOUCH_INTERFACE, "frame", touch, &[]);
+        }
+    }
+
+    pub fn touch_cancel(&mut self) {
+        let touches = self
+            .seats
+            .values()
+            .flat_map(|seat| seat.touches.iter().copied())
+            .collect::<Vec<_>>();
+        for touch in touches {
+            self.emit(&wl::WL_TOUCH_INTERFACE, "cancel", touch, &[]);
             self.emit(&wl::WL_TOUCH_INTERFACE, "frame", touch, &[]);
         }
     }

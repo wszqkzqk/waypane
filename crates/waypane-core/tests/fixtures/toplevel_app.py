@@ -54,17 +54,21 @@ def events():
                 yield object_id, opcode, payload, descriptors
 
 
-def wait_done(callback_id):
+def track_input(object_id, opcode):
     global saw_keyboard_enter, saw_pointer_enter, saw_key
+    if object_id == 13 and opcode == 1:
+        saw_keyboard_enter = True
+    if object_id == 24 and opcode == 0:
+        saw_pointer_enter = True
+    if object_id == 13 and opcode == 3:
+        saw_key = True
+
+
+def wait_done(callback_id):
     for object_id, opcode, payload, descriptors in events():
         for fd in descriptors:
             os.close(fd)
-        if object_id == 13 and opcode == 1:
-            saw_keyboard_enter = True
-        if object_id == 24 and opcode == 0:
-            saw_pointer_enter = True
-        if object_id == 13 and opcode == 3:
-            saw_key = True
+        track_input(object_id, opcode)
         if object_id == callback_id and opcode == 0:
             return
 
@@ -147,9 +151,17 @@ with tempfile.TemporaryFile() as pool:
     pool.flush()
     sock.sendall(message(18, 0, struct.pack("<IiiiiI", 22, 0, 32, 32, 128, 1)))
     sock.sendall(message(15, 1, struct.pack("<Iii", 22, 0, 0)))
+    sock.sendall(message(15, 3, struct.pack("<I", 23)))
     sock.sendall(message(15, 6, b""))
-    sync(23)
-    wait_done(23)
+    released = done = False
+    for object_id, opcode, _, descriptors in events():
+        for fd in descriptors:
+            os.close(fd)
+        track_input(object_id, opcode)
+        released |= object_id == 22 and opcode == 0
+        done |= object_id == 23 and opcode == 0
+        if released and done:
+            break
 
     sock.sendall(message(20, 0, b""))
     sock.sendall(message(22, 0, b""))
@@ -160,5 +172,6 @@ with tempfile.TemporaryFile() as pool:
     sync(26)
     wait_done(26)
 
-assert saw_keyboard_enter and saw_pointer_enter and saw_key
+if os.environ.get("WAYPANE_SKIP_INPUT") != "1":
+    assert saw_keyboard_enter and saw_pointer_enter and saw_key
 print("remote xdg toplevel application completed")

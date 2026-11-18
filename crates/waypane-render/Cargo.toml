@@ -5,4 +5,15 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["desktop"]
+desktop = ["dep:winit"]
+
 [dependencies]
+log = "0.4"
+pollster = "0.4"
+thiserror = "2"
+waypane-core = { path = "../waypane-core" }
+waypipe-client = { path = "../waypipe-client" }
+wgpu = "30.0.1"
+winit = { version = "0.30", optional = true, features = ["rwh_06"] }

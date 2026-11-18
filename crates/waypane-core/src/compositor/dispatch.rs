@@ -430,7 +430,6 @@ impl Compositor {
                     let serial = self.next_serial();
                     let config = self.xdg_surfaces.get_mut(&xdg_surface).unwrap();
                     config.configure_serial = Some(serial);
-                    config.initial_ack_seen = false;
                     self.send_configure(request.object_id, xdg_surface, None, &states, serial);
                 }
                 self.events.push(CoreEvent::WindowRequest {

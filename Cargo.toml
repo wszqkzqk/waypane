@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "apps/waypane-desktop",
+    "crates/waypane-android",
     "crates/waypane-core",
     "crates/waypipe-client",
     "crates/waypane-render",
