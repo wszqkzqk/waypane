@@ -37,6 +37,7 @@ val rustBuild by tasks.registering(Exec::class) {
 android {
     namespace = "org.waypane.app"
     compileSdk = 37
+    buildToolsVersion = "37.0.0"
 
     defaultConfig {
         applicationId = "org.waypane.app"
