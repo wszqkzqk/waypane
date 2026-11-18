@@ -22,7 +22,7 @@ data class AndroidWindow(
     val height: Int,
 ) {
     val displayTitle: String
-        get() = title.ifBlank { appId.ifBlank { "Surface $window" }.let { "$it — Waypane" } }
+        get() = title.ifBlank { appId.ifBlank { "Surface ${key.window}" }.let { "$it — Waypane" } }
 
     val aspectRatio: Float?
         get() = if (width > 0 && height > 0) width.toFloat() / height.toFloat() else null

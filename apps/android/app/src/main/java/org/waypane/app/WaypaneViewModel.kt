@@ -101,7 +101,7 @@ class WaypaneViewModel(application: Application) : AndroidViewModel(application)
                 user = profile.user.trim(),
                 identity = profile.identity,
                 password = profile.password,
-                knownHosts = knownHostsPath,
+                knownHosts = knownHostsFile,
                 acceptNewHostKey = profile.acceptNewHostKey,
                 compression = profile.compression,
                 command = profile.command.trim(),
