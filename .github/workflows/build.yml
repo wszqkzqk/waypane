@@ -22,10 +22,10 @@ env:
 jobs:
   quality:
     name: Format and lint
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -51,7 +51,7 @@ jobs:
           - os: windows-latest
             binary: waypane-desktop.exe
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -64,7 +64,7 @@ jobs:
       - name: Build desktop application
         run: cargo build --release --locked -p waypane-desktop
       - name: Upload desktop binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: waypane-desktop-${{ runner.os }}-${{ runner.arch }}
           path: target/release/${{ matrix.binary }}
@@ -73,10 +73,10 @@ jobs:
 
   upstream-interop:
     name: Upstream Waypipe interoperability
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -121,43 +121,51 @@ jobs:
 
   android:
     name: Android APK
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - name: Install JDK 17
-        uses: actions/setup-java@v4
+      - uses: actions/checkout@v7
+      - name: Resolve latest LTS JDK
+        id: jdk
+        run: |
+          version="$(curl -fsSL https://api.adoptium.net/v3/info/available_releases \
+            | python3 -c 'import json, sys; print(json.load(sys.stdin)["most_recent_lts"])')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Install latest LTS JDK
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: "17"
-      - name: Install Gradle
-        uses: gradle/actions/setup-gradle@v4
+          java-version: ${{ steps.jdk.outputs.version }}
+      - name: Install current Gradle
+        uses: gradle/actions/setup-gradle@v6
         with:
-          gradle-version: "8.9"
+          gradle-version: current
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
-      - name: Install cargo-ndk
+      - name: Install latest cargo-ndk
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-ndk@4.1.2
-      - name: Install Android NDK r27d
-        id: ndk
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r27d
+          tool: cargo-ndk
       - uses: Swatinem/rust-cache@v2
         with:
           key: android-aarch64
-      - name: Build debug APK
+      - name: Ensure Android SDK 37
+        run: |
+          test -n "${ANDROID_NDK_LATEST_HOME:-}"
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platforms;android-37" "build-tools;36.0.0"
+      - name: Build debug APK with the runner's latest NDK
         working-directory: apps/android
-        env:
-          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
-          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
-        run: gradle --no-daemon --stacktrace :app:assembleDebug
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          export ANDROID_NDK_ROOT="$ANDROID_NDK_LATEST_HOME"
+          cargo ndk --version
+          grep '^Pkg.Revision' "$ANDROID_NDK_HOME/source.properties"
+          gradle --no-daemon --stacktrace :app:assembleDebug
       - name: Upload debug APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: waypane-android-debug-arm64
           path: apps/android/app/build/outputs/apk/debug/app-debug.apk

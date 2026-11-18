@@ -67,7 +67,7 @@ run a 60 Hz polling loop.
 
 ## Build and test
 
-Rust 1.87 or later is required by the workspace.
+Rust 1.90 or later is required by the workspace; CI tracks the latest stable release.
 
 ```sh
 cargo check --workspace --all-targets --features jni-check --locked
@@ -100,12 +100,16 @@ development does not require Android, NDK, Gradle, or Windows SDK installations:
 - `desktop`: workspace checks, tests, and release builds on macOS and Windows
 - `upstream-interop`: builds vendored Waypipe with only SHM/LZ4/Zstd support and runs all four
   integration tests against it on Ubuntu
-- `android`: uses JDK 17, Gradle 8.9, NDK r27d, and cargo-ndk 4.1.2 to build the arm64
-  debug APK (`minSdk 26`, `targetSdk 35`)
+- `android`: resolves the latest LTS JDK and uses current Gradle, the runner's latest NDK,
+  and the latest cargo-ndk to build the AGP 9 built-in-Kotlin arm64 APK (`minSdk 26`,
+  `targetSdk 37`)
 
 Workflow runs upload the desktop binaries as `waypane-desktop-<OS>-<ARCH>` and the APK as
 `waypane-android-debug-arm64`. Heavy SDK installations and their licenses live only on
-disposable CI runners.
+disposable CI runners. GitHub Actions, Cargo, and Gradle dependencies use current stable
+versions, with Dependabot proposing grouped updates every week. `Cargo.lock` remains
+committed so individual CI runs stay reproducible. The vendored Waypipe version stays fixed
+as the protocol reference and test peer.
 
 Local development only needs a Rust toolchain for workspace checks and unit tests. The
 upstream integration tests remain opt-in when a host-native `waypipe` binary is available.
@@ -162,8 +166,9 @@ window is not counted as presented.
   reported the 64x64 CLI-created window as `Occluded`, so that run did not claim a new on-screen
   presentation.
 - The Android Rust/JNI code passed `cargo ndk` checking with NDK r27d for
-  `aarch64-linux-android` at API 26 during development. The CI workflow builds the full APK;
-  that workflow has not run remotely yet, and no physical Android device has been tested.
+  `aarch64-linux-android` at API 26 during development. That native check predates the
+  subsequent AGP 9/Kotlin 2.4/API 37 migration. The full APK is built only in CI and that
+  workflow has not run remotely yet; no physical Android device has been tested.
 - `waypane-desktop` passed local `cargo check` and Clippy with `-D warnings` for
   `x86_64-pc-windows-msvc`. Native Windows check, test, and release-build jobs are in CI and
   have not run remotely yet; interactive behavior has not been verified on Windows.
