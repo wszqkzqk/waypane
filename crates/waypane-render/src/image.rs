@@ -43,6 +43,9 @@ impl Canvas {
         frame: &Frame,
         pool: Option<&[u8]>,
     ) -> Result<Vec<UploadRegion>, ImageError> {
+        if let Some(order) = &frame.z_order {
+            self.order.clone_from(order);
+        }
         let Some(view) = frame.buffer.as_ref() else {
             return Ok(self.remove_layer(frame.surface_id));
         };
@@ -405,6 +408,7 @@ mod tests {
             surface_id,
             parent,
             buffer: Some(buffer),
+            z_order: None,
         }
     }
 

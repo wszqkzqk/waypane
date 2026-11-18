@@ -23,6 +23,7 @@ pub const GLOBALS: &[(&str, u32)] = &[
     ("xdg_wm_base", 6),
     ("wl_seat", 9),
     ("wl_output", 4),
+    ("wl_data_device_manager", 3),
 ];
 
 pub fn event_opcode(interface: &Interface, name: &str) -> u16 {
@@ -45,6 +46,10 @@ pub fn interface_by_name(name: &str) -> Option<&'static Interface> {
     [
         &wayland::WL_CALLBACK_INTERFACE,
         &wayland::WL_COMPOSITOR_INTERFACE,
+        &wayland::WL_DATA_DEVICE_INTERFACE,
+        &wayland::WL_DATA_DEVICE_MANAGER_INTERFACE,
+        &wayland::WL_DATA_OFFER_INTERFACE,
+        &wayland::WL_DATA_SOURCE_INTERFACE,
         &wayland::WL_DISPLAY_INTERFACE,
         &wayland::WL_BUFFER_INTERFACE,
         &wayland::WL_KEYBOARD_INTERFACE,

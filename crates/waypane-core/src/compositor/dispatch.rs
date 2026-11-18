@@ -153,10 +153,36 @@ impl Compositor {
                 if self.surfaces[&surface].role != Role::None {
                     return Err(bad(request, "surface already has a role"));
                 }
+                let mut ancestor = Some(parent);
+                for _ in 0..64 {
+                    let Some(id) = ancestor else { break };
+                    if id == surface {
+                        return Err(bad(request, "subsurface parent loop"));
+                    }
+                    ancestor = match self.surfaces[&id].role {
+                        Role::Subsurface { parent, .. } => Some(parent),
+                        _ => None,
+                    };
+                }
+                if ancestor.is_some() {
+                    return Err(bad(request, "subsurface hierarchy exceeds 64 levels"));
+                }
                 let window_id = self.surfaces[&parent].window_id;
                 let entry = self.surfaces.get_mut(&surface).unwrap();
                 entry.role = Role::Subsurface { parent, proxy: id };
                 entry.window_id = window_id;
+                self.subsurface_sync.insert(
+                    id,
+                    SubsurfaceSync {
+                        surface,
+                        synchronized: true,
+                        cached: Default::default(),
+                    },
+                );
+                self.subsurface_stacks
+                    .entry(parent)
+                    .or_default()
+                    .push(surface);
             }
             (ObjectKind::Subsurface, "set_position") => {
                 let surface = self.subsurface_surface(request.object_id)?;
@@ -165,13 +191,25 @@ impl Compositor {
                     y: int(request, 1)?,
                 });
             }
-            (ObjectKind::Subsurface, "place_above" | "place_below" | "set_sync" | "set_desync") => {
+            (ObjectKind::Subsurface, "place_above" | "place_below") => {
+                self.restack_subsurface(request)?;
+            }
+            (ObjectKind::Subsurface, "set_sync" | "set_desync") => {
+                let synchronized = request.method.name == "set_sync";
+                self.subsurface_sync
+                    .get_mut(&request.object_id)
+                    .ok_or_else(|| bad(request, "unknown subsurface"))?
+                    .synchronized = synchronized;
             }
             (ObjectKind::Subsurface, "destroy") => {
                 let surface = self.subsurface_surface(request.object_id)?;
                 if let Some(surface) = self.surfaces.get_mut(&surface) {
                     surface.role = Role::None;
                     surface.window_id = None;
+                }
+                self.subsurface_sync.remove(&request.object_id);
+                for stack in self.subsurface_stacks.values_mut() {
+                    stack.retain(|id| *id != surface);
                 }
             }
             (ObjectKind::Surface, "destroy") => {
@@ -541,6 +579,18 @@ impl Compositor {
             (ObjectKind::Seat, "release") => {}
             (ObjectKind::Region, "add" | "subtract" | "destroy") => {}
             (ObjectKind::Output, "release") => {}
+            (ObjectKind::DataDeviceManager, "create_data_source") => {
+                self.create_data_source(request)?;
+            }
+            (ObjectKind::DataDeviceManager, "get_data_device") => {
+                self.create_data_device(request)?;
+            }
+            (ObjectKind::DataSource, "offer") => self.offer_source_mime(request)?,
+            (ObjectKind::DataSource, "set_actions" | "destroy") => {}
+            (ObjectKind::DataDevice, "set_selection") => self.set_remote_selection(request)?,
+            (ObjectKind::DataDevice, "start_drag" | "release") => {}
+            (ObjectKind::DataOffer, "receive") => self.receive_offer(client, request)?,
+            (ObjectKind::DataOffer, "set_actions" | "finish" | "destroy") => {}
             (_, "destroy" | "release") => {}
             _ => {
                 return Err(Error::protocol(format!(
@@ -770,7 +820,7 @@ impl Compositor {
         Ok(())
     }
 
-    fn commit_surface(&mut self, client: &mut Client, surface_id: u32) -> Result<()> {
+    fn commit_surface_now(&mut self, client: &mut Client, surface_id: u32) -> Result<()> {
         if let Some(xdg_surface) = self
             .xdg_surfaces
             .values()
@@ -827,6 +877,24 @@ impl Compositor {
             Role::Subsurface { parent, .. } => Some((parent, position)),
             _ => None,
         };
+        let z_order = self.subsurface_z_order(window_id, &role);
+        if attach == Some(None) {
+            if let Some(surface) = self.surfaces.get_mut(&surface_id) {
+                surface.logical_size = Size::default();
+            }
+        } else if let Some(view) = &buffer {
+            let (width, height) = if view.transform % 2 == 1 {
+                (view.height, view.width)
+            } else {
+                (view.width, view.height)
+            };
+            if let Some(surface) = self.surfaces.get_mut(&surface_id) {
+                surface.logical_size = Size {
+                    width: (width / view.scale.max(1)).max(1) as u32,
+                    height: (height / view.scale.max(1)).max(1) as u32,
+                };
+            }
+        }
 
         if let Some(window_id) = window_id {
             if buffer.is_some() || attach == Some(None) || !callbacks.is_empty() {
@@ -846,6 +914,7 @@ impl Compositor {
                     surface_id,
                     parent,
                     buffer,
+                    z_order,
                 }));
             }
         } else {
@@ -867,6 +936,139 @@ impl Compositor {
         }
         self.retire_orphan_buffers(client);
         Ok(())
+    }
+
+    fn commit_surface(&mut self, client: &mut Client, surface_id: u32) -> Result<()> {
+        let role = self
+            .surfaces
+            .get(&surface_id)
+            .map(|surface| surface.role)
+            .ok_or_else(|| Error::protocol("committing unknown surface"))?;
+        if let Role::Subsurface { proxy, .. } = role {
+            let synchronized = self
+                .subsurface_sync
+                .get(&proxy)
+                .ok_or_else(|| Error::protocol("subsurface has no synchronization state"))?
+                .synchronized;
+            let current = std::mem::take(
+                &mut self
+                    .surfaces
+                    .get_mut(&surface_id)
+                    .ok_or_else(|| Error::protocol("committing unknown surface"))?
+                    .pending,
+            );
+            if synchronized {
+                let cache = self.subsurface_sync.get_mut(&proxy).unwrap();
+                if cache.cached.len() >= 64 {
+                    return Err(Error::protocol("subsurface commit cache exceeds 64 frames"));
+                }
+                cache.cached.push_back(current);
+                return Ok(());
+            }
+            let cached = std::mem::take(&mut self.subsurface_sync.get_mut(&proxy).unwrap().cached);
+            for pending in cached {
+                self.surfaces.get_mut(&surface_id).unwrap().pending = pending;
+                self.commit_surface_now(client, surface_id)?;
+                self.flush_synchronized_children(client, surface_id)?;
+            }
+            self.surfaces.get_mut(&surface_id).unwrap().pending = current;
+        }
+        self.commit_surface_now(client, surface_id)?;
+        self.flush_synchronized_children(client, surface_id)
+    }
+
+    fn flush_synchronized_children(&mut self, client: &mut Client, parent_id: u32) -> Result<()> {
+        let children = self
+            .subsurface_sync
+            .iter()
+            .filter(|(_, sync)| {
+                sync.synchronized
+                    && self.surfaces.get(&sync.surface).is_some_and(|surface| {
+                        matches!(surface.role, Role::Subsurface { parent, .. } if parent == parent_id)
+                    })
+            })
+            .map(|(proxy, sync)| (*proxy, sync.surface))
+            .collect::<Vec<_>>();
+        for (proxy, surface_id) in children {
+            while let Some(pending) = self
+                .subsurface_sync
+                .get_mut(&proxy)
+                .unwrap()
+                .cached
+                .pop_front()
+            {
+                self.surfaces.get_mut(&surface_id).unwrap().pending = pending;
+                self.commit_surface_now(client, surface_id)?;
+                self.flush_synchronized_children(client, surface_id)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn restack_subsurface(&mut self, request: &DecodedRequest) -> Result<()> {
+        let surface = self.subsurface_surface(request.object_id)?;
+        let sibling = object_id(request, 0)?;
+        if surface == sibling {
+            return Err(bad(request, "cannot restack relative to itself"));
+        }
+        let Role::Subsurface { parent, .. } = self.surfaces[&surface].role else {
+            return Err(bad(request, "not a subsurface"));
+        };
+        if sibling != parent {
+            match self.surfaces.get(&sibling).map(|surface| surface.role) {
+                Some(Role::Subsurface {
+                    parent: sibling_parent,
+                    ..
+                }) if sibling_parent == parent => {}
+                _ => return Err(bad(request, "sibling is not in the same parent surface")),
+            }
+        }
+        let above = request.method.name == "place_above";
+        let stack = self.subsurface_stacks.entry(parent).or_default();
+        stack.retain(|id| *id != surface);
+        let index = if sibling == parent {
+            if above {
+                0
+            } else {
+                stack.len()
+            }
+        } else {
+            let position = stack
+                .iter()
+                .position(|id| *id == sibling)
+                .ok_or_else(|| bad(request, "sibling is not in parent stack"))?;
+            if above {
+                position + 1
+            } else {
+                position
+            }
+        };
+        stack.insert(index.min(stack.len()), surface);
+        Ok(())
+    }
+
+    fn subsurface_z_order(&self, window_id: Option<WindowId>, role: &Role) -> Option<Vec<u32>> {
+        let Role::Subsurface { parent, .. } = *role else {
+            return None;
+        };
+        let root = self.windows.get(&window_id?)?.surface_id;
+        let mut order = vec![root];
+        self.collect_subsurface_order(parent, &mut order, 0);
+        Some(order)
+    }
+
+    fn collect_subsurface_order(&self, parent: u32, order: &mut Vec<u32>, depth: usize) {
+        if depth >= 64 {
+            return;
+        }
+        if let Some(children) = self.subsurface_stacks.get(&parent) {
+            for child in children.iter().copied() {
+                if self.surfaces.contains_key(&child) {
+                    order.push(child);
+                    self.collect_subsurface_order(child, order, depth + 1);
+                }
+            }
+        }
     }
 
     fn buffer_view(
@@ -948,7 +1150,7 @@ impl Compositor {
             .ok_or_else(|| Error::protocol(format!("subsurface {id} has no wl_surface mapping")))
     }
 
-    fn create_new(&mut self, request: &DecodedRequest, index: usize) -> Result<u32> {
+    pub(super) fn create_new(&mut self, request: &DecodedRequest, index: usize) -> Result<u32> {
         let (id, interface) = request
             .args
             .get(index)
@@ -1038,6 +1240,9 @@ impl Compositor {
                     seat.touches.retain(|touch| *touch != id);
                 }
             }
+            ObjectKind::DataDevice | ObjectKind::DataSource | ObjectKind::DataOffer => {
+                self.finish_clipboard_destructor(client, id, kind);
+            }
             _ => {}
         }
         self.objects.remove(&id);
@@ -1065,7 +1270,7 @@ impl Compositor {
     }
 }
 
-fn bad(request: &DecodedRequest, reason: impl Into<String>) -> Error {
+pub(super) fn bad(request: &DecodedRequest, reason: impl Into<String>) -> Error {
     Error::MalformedMessage {
         interface: request.interface.name,
         message: request.method.name,
@@ -1073,7 +1278,7 @@ fn bad(request: &DecodedRequest, reason: impl Into<String>) -> Error {
     }
 }
 
-fn uint(request: &DecodedRequest, index: usize) -> Result<u32> {
+pub(super) fn uint(request: &DecodedRequest, index: usize) -> Result<u32> {
     request
         .args
         .get(index)
@@ -1081,7 +1286,7 @@ fn uint(request: &DecodedRequest, index: usize) -> Result<u32> {
         .ok_or_else(|| bad(request, "expected uint argument"))
 }
 
-fn int(request: &DecodedRequest, index: usize) -> Result<i32> {
+pub(super) fn int(request: &DecodedRequest, index: usize) -> Result<i32> {
     request
         .args
         .get(index)
@@ -1096,11 +1301,11 @@ fn int(request: &DecodedRequest, index: usize) -> Result<i32> {
         .ok_or_else(|| bad(request, "expected int argument"))
 }
 
-fn object_id(request: &DecodedRequest, index: usize) -> Result<u32> {
+pub(super) fn object_id(request: &DecodedRequest, index: usize) -> Result<u32> {
     optional_object_id(request, index)?.ok_or_else(|| bad(request, "unexpected null object"))
 }
 
-fn optional_object_id(request: &DecodedRequest, index: usize) -> Result<Option<u32>> {
+pub(super) fn optional_object_id(request: &DecodedRequest, index: usize) -> Result<Option<u32>> {
     request
         .args
         .get(index)
@@ -1109,7 +1314,7 @@ fn optional_object_id(request: &DecodedRequest, index: usize) -> Result<Option<u
         .ok_or_else(|| bad(request, "expected object argument"))
 }
 
-fn string(request: &DecodedRequest, index: usize) -> Result<&str> {
+pub(super) fn string(request: &DecodedRequest, index: usize) -> Result<&str> {
     request
         .args
         .get(index)
@@ -1117,7 +1322,7 @@ fn string(request: &DecodedRequest, index: usize) -> Result<&str> {
         .ok_or_else(|| bad(request, "expected string argument"))
 }
 
-fn fd(request: &DecodedRequest, index: usize) -> Result<Rid> {
+pub(super) fn fd(request: &DecodedRequest, index: usize) -> Result<Rid> {
     request
         .args
         .get(index)
@@ -1125,7 +1330,7 @@ fn fd(request: &DecodedRequest, index: usize) -> Result<Rid> {
         .ok_or_else(|| bad(request, "expected fd argument"))
 }
 
-fn rect(request: &DecodedRequest, index: usize) -> Result<Rect> {
+pub(super) fn rect(request: &DecodedRequest, index: usize) -> Result<Rect> {
     Ok(Rect {
         x: int(request, index)?,
         y: int(request, index + 1)?,
@@ -1195,3 +1400,6 @@ fn byte_range_damage(buffer: &Buffer, range: &std::ops::Range<usize>, damage: &m
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

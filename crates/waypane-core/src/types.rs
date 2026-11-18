@@ -77,6 +77,7 @@ pub struct Frame {
     pub surface_id: SurfaceId,
     pub parent: Option<(SurfaceId, Point)>,
     pub buffer: Option<BufferView>,
+    pub z_order: Option<Vec<SurfaceId>>,
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +104,14 @@ pub enum CoreEvent {
     Frame(Frame),
     PipeAvailable {
         rid: Rid,
+    },
+    ClipboardChanged {
+        source: Option<u32>,
+        mime_types: Vec<String>,
+    },
+    ClipboardData {
+        mime_type: String,
+        data: Vec<u8>,
     },
     Closed,
 }

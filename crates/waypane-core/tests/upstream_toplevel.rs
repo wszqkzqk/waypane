@@ -195,6 +195,9 @@ fn drives_xdg_toplevel_through_upstream_waypipe() {
             );
         }
     };
+    if result.is_err() {
+        let _ = child.kill();
+    }
     let output = child.wait_with_output().unwrap();
     peer.join().unwrap();
     if let Err(error) = result {

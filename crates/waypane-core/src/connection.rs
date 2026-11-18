@@ -42,7 +42,7 @@ impl Connection {
                 ClientEvent::Negotiated { .. } | ClientEvent::ShmUpdated { .. } => {}
                 ClientEvent::ShmOpened { .. } | ClientEvent::ShmExtended { .. } => {}
                 ClientEvent::PipeOpened { rid, .. } | ClientEvent::PipeUpdated { rid } => {
-                    events.push(CoreEvent::PipeAvailable { rid });
+                    events.extend(self.compositor.process_pipe(&mut self.client, rid)?);
                 }
                 ClientEvent::RidsInjected(rids) => self.rids.extend(rids),
                 ClientEvent::Protocol(messages) => {
@@ -65,6 +65,11 @@ impl Connection {
             outgoing: outgoing.freeze(),
             events,
         })
+    }
+
+    pub fn request_clipboard_text(&mut self) -> Result<Bytes> {
+        self.compositor.request_clipboard_text(&mut self.client)?;
+        self.flush()
     }
 
     pub fn complete_frame(&mut self, frame_id: FrameId, time: u32) -> Result<Bytes> {

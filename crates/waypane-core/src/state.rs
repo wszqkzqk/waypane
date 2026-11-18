@@ -27,6 +27,10 @@ pub(crate) enum ObjectKind {
     Pointer,
     Touch,
     Output,
+    DataDeviceManager,
+    DataDevice,
+    DataSource,
+    DataOffer,
     Other,
 }
 
@@ -70,6 +74,10 @@ pub(crate) fn kind_for_name(name: &str) -> ObjectKind {
         "wl_pointer" => ObjectKind::Pointer,
         "wl_touch" => ObjectKind::Touch,
         "wl_output" => ObjectKind::Output,
+        "wl_data_device_manager" => ObjectKind::DataDeviceManager,
+        "wl_data_device" => ObjectKind::DataDevice,
+        "wl_data_source" => ObjectKind::DataSource,
+        "wl_data_offer" => ObjectKind::DataOffer,
         _ => ObjectKind::Other,
     }
 }
@@ -127,6 +135,54 @@ pub(crate) struct Surface {
     pub role: Role,
     pub window_id: Option<WindowId>,
     pub position: Point,
+    pub logical_size: crate::types::Size,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct SubsurfaceSync {
+    pub surface: u32,
+    pub synchronized: bool,
+    pub cached: std::collections::VecDeque<PendingSurface>,
+}
+
+#[derive(Debug)]
+pub(crate) struct DataDevice {
+    pub focused: bool,
+    pub offered: std::collections::BTreeSet<u32>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct DataSource {
+    pub mime_types: Vec<String>,
+    pub cached_text: Option<std::sync::Arc<[u8]>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum SelectionState {
+    Host {
+        text: std::sync::Arc<[u8]>,
+        mime_types: Vec<String>,
+    },
+    Remote {
+        source_id: u32,
+        mime_types: Vec<String>,
+    },
+}
+
+impl SelectionState {
+    pub fn mime_types(&self) -> &[String] {
+        match self {
+            Self::Host { mime_types, .. } | Self::Remote { mime_types, .. } => mime_types,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ClipboardRead {
+    pub mime_type: String,
+    pub data: Vec<u8>,
+    pub forwards: Vec<waypipe_client::Rid>,
+    pub source_id: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -197,4 +253,5 @@ pub(crate) struct Seat {
     pub keyboards: Vec<u32>,
     pub pointers: Vec<u32>,
     pub touches: Vec<u32>,
+    pub data_devices: Vec<u32>,
 }
