@@ -2,7 +2,7 @@ mod gpu;
 
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use gpu::GpuRenderer;
 use jni::objects::{JClass, JObject, JString};
@@ -248,11 +248,58 @@ pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeIsDirty(
                 surface
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .dirty
-                    .load(Ordering::Acquire)
+                    .signal
+                    .is_dirty()
             })
             .unwrap_or(false);
         Ok(jb(dirty))
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeWaitDirty(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    session: jlong,
+    window: jint,
+    seen_version: jlong,
+    timeout_ms: jint,
+) -> jlong {
+    jni_guard!(env, env, jlong, {
+        let key = key(session, window)?;
+        let seen_version =
+            u64::try_from(seen_version).map_err(|_| "invalid frame version".to_string())?;
+        let timeout_ms = u64::try_from(timeout_ms).unwrap_or(0).min(300_000);
+        let signal = state(handle)?.actor.surface(key).map(|surface| {
+            surface
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .signal()
+        });
+        let version = signal
+            .and_then(|signal| signal.wait_dirty(seen_version, Duration::from_millis(timeout_ms)));
+        Ok(version.map_or(0, |version| version as jlong))
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeWakeSurface(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    session: jlong,
+    window: jint,
+) {
+    jni_guard!(env, env, (), {
+        if let Some(surface) = state(handle)?.actor.surface(key(session, window)?) {
+            let signal = surface
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .signal();
+            signal.wake();
+        }
+        Ok(())
     })
 }
 
@@ -361,6 +408,21 @@ pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeKey(
             code,
             pressed,
         ))))
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeSetClipboardText(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    value: JString<'_>,
+) -> jboolean {
+    jni_guard!(env, env, jboolean, {
+        let text = text(env, &value)?;
+        Ok(jb(state(handle)?
+            .actor
+            .send(ActorCommand::SetClipboard(text))))
     })
 }
 

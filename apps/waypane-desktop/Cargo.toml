@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+arboard = { version = "3.4", default-features = false }
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 env_logger = "0.11"

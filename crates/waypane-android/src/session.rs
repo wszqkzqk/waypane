@@ -33,6 +33,7 @@ pub enum ActorCommand {
     CloseWindow(SurfaceKey),
     DisconnectSession(SessionId),
     Resize(SurfaceKey, Size),
+    SetClipboard(String),
     Stop,
 }
 
@@ -179,6 +180,7 @@ async fn run_actor(
                     ActorCommand::Pointer(key, x, y, button) => (key.session, lock(&engine).pointer(key, x, y, button)),
                     ActorCommand::CloseWindow(key) => (key.session, lock(&engine).close_window(key)),
                     ActorCommand::Resize(key, size) => (key.session, lock(&engine).resize(key, size)),
+                    ActorCommand::SetClipboard(text) => (0, lock(&engine).set_clipboard_text(&text)),
                     ActorCommand::DisconnectSession(id) => {
                         let result = lock(&engine).disconnect(id, true);
                         dispatch_result(&engine, result, id, &routes, &events).await;
@@ -227,15 +229,16 @@ async fn dispatch_result(
 ) {
     match result {
         Ok(output) => {
-            if !output.outgoing.is_empty() {
-                let sender = lock(routes).get(&session).cloned();
-                if let Some(sender) = sender {
-                    if sender.send(output.outgoing).await.is_err() {
-                        lock(routes).remove(&session);
-                    }
-                }
+            let EngineOutput {
+                outgoing,
+                extra_outgoing,
+                events: batch_events,
+            } = output;
+            send_routed(routes, session, outgoing).await;
+            for (id, data) in extra_outgoing {
+                send_routed(routes, id, data).await;
             }
-            emit_output(events, output.events);
+            emit_output(events, batch_events);
         }
         Err(error) => {
             let _ = events.send(EngineEvent::Error {
@@ -245,6 +248,18 @@ async fn dispatch_result(
             if let Ok(output) = lock(engine).disconnect(session, false) {
                 emit_output(events, output.events);
             }
+            lock(routes).remove(&session);
+        }
+    }
+}
+
+async fn send_routed(routes: &Routes, session: SessionId, data: Bytes) {
+    if data.is_empty() {
+        return;
+    }
+    let sender = lock(routes).get(&session).cloned();
+    if let Some(sender) = sender {
+        if sender.send(data).await.is_err() {
             lock(routes).remove(&session);
         }
     }

@@ -100,7 +100,7 @@ impl NativeSurface {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) -> Option<u64> {
-        if !state.dirty.load(std::sync::atomic::Ordering::Acquire) {
+        if !state.signal.is_dirty() {
             return None;
         }
         let size = state.canvas.size();
@@ -157,9 +157,7 @@ impl NativeSurface {
         queue.submit([encoder.finish()]);
         queue.present(frame);
         let version = state.version;
-        state
-            .dirty
-            .store(false, std::sync::atomic::Ordering::Release);
+        state.signal.mark_clean();
         Some(version)
     }
 }

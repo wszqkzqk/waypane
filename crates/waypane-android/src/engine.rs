@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
@@ -42,6 +42,10 @@ pub enum EngineEvent {
     Status {
         message: String,
     },
+    ClipboardText {
+        session: SessionId,
+        text: String,
+    },
     Error {
         session: Option<SessionId>,
         message: String,
@@ -51,15 +55,74 @@ pub enum EngineEvent {
 #[derive(Debug, Default)]
 pub struct EngineOutput {
     pub outgoing: Bytes,
+    pub extra_outgoing: Vec<(SessionId, Bytes)>,
     pub events: Vec<EngineEvent>,
 }
 
 impl EngineOutput {
-    fn join(&mut self, other: EngineOutput) {
+    fn join(&mut self, mut other: EngineOutput) {
         let mut outgoing = BytesMut::from(self.outgoing.as_ref());
         outgoing.extend_from_slice(&other.outgoing);
         self.outgoing = outgoing.freeze();
+        self.extra_outgoing.append(&mut other.extra_outgoing);
         self.events.extend(other.events);
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct SurfaceSignal {
+    dirty: AtomicBool,
+    version: AtomicU64,
+    wake_epoch: AtomicU64,
+    wait_lock: Mutex<()>,
+    condvar: Condvar,
+}
+
+impl SurfaceSignal {
+    pub fn is_dirty(&self) -> bool {
+        self.dirty.load(Ordering::Acquire)
+    }
+
+    pub fn mark_dirty(&self, version: u64) {
+        self.version.store(version, Ordering::Release);
+        self.dirty.store(true, Ordering::Release);
+        self.condvar.notify_all();
+    }
+
+    pub fn mark_clean(&self) {
+        self.dirty.store(false, Ordering::Release);
+    }
+
+    pub fn wake(&self) {
+        self.wake_epoch.fetch_add(1, Ordering::AcqRel);
+        self.condvar.notify_all();
+    }
+
+    pub fn wait_dirty(&self, seen_version: u64, timeout: Duration) -> Option<u64> {
+        if let Some(version) = self.dirty_version(seen_version) {
+            return Some(version);
+        }
+        let epoch = self.wake_epoch.load(Ordering::Acquire);
+        let guard = self
+            .wait_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(version) = self.dirty_version(seen_version) {
+            return Some(version);
+        }
+        let _ = self.condvar.wait_timeout_while(guard, timeout, |_| {
+            self.dirty_version(seen_version).is_none()
+                && self.wake_epoch.load(Ordering::Acquire) == epoch
+        });
+        self.dirty_version(seen_version)
+    }
+
+    fn dirty_version(&self, seen_version: u64) -> Option<u64> {
+        if !self.is_dirty() {
+            return None;
+        }
+        let version = self.version.load(Ordering::Acquire);
+        (version > seen_version).then_some(version)
     }
 }
 
@@ -67,7 +130,7 @@ impl EngineOutput {
 pub struct AndroidSurface {
     pub canvas: Canvas,
     pub version: u64,
-    pub dirty: Arc<AtomicBool>,
+    pub signal: Arc<SurfaceSignal>,
     scale: i32,
     frames: VecDeque<(u64, u64)>,
 }
@@ -77,14 +140,14 @@ impl AndroidSurface {
         Self {
             canvas: Canvas::default(),
             version: 0,
-            dirty: Arc::new(AtomicBool::new(false)),
+            signal: Arc::new(SurfaceSignal::default()),
             scale: 1,
             frames: VecDeque::new(),
         }
     }
 
-    pub fn dirty_handle(&self) -> Arc<AtomicBool> {
-        self.dirty.clone()
+    pub fn signal(&self) -> Arc<SurfaceSignal> {
+        self.signal.clone()
     }
 }
 
@@ -113,6 +176,7 @@ pub struct AndroidEngine {
     surfaces: HashMap<SurfaceKey, Arc<Mutex<AndroidSurface>>>,
     windows: HashMap<SurfaceKey, AndroidWindow>,
     popups: HashMap<SurfaceKey, PopupInfo>,
+    host_clipboard: Option<String>,
     clock: Instant,
 }
 
@@ -127,6 +191,7 @@ impl AndroidEngine {
             surfaces: HashMap::new(),
             windows: HashMap::new(),
             popups: HashMap::new(),
+            host_clipboard: None,
             clock: Instant::now(),
         }
     }
@@ -134,8 +199,15 @@ impl AndroidEngine {
     pub fn connected(&mut self, session: SessionId) -> EngineOutput {
         self.connections
             .insert(session, Connection::new(self.config));
+        if let Some(text) = self.host_clipboard.clone() {
+            if let Some(connection) = self.connections.get_mut(&session) {
+                let _ = connection.compositor_mut().set_clipboard_text(&text);
+                let _ = connection.compositor_mut().take_events();
+            }
+        }
         EngineOutput {
             outgoing: Bytes::new(),
+            extra_outgoing: Vec::new(),
             events: vec![EngineEvent::Connected { session }],
         }
     }
@@ -177,6 +249,22 @@ impl AndroidEngine {
 
     pub fn surface(&self, key: SurfaceKey) -> Option<Arc<Mutex<AndroidSurface>>> {
         self.surfaces.get(&key).cloned()
+    }
+
+    pub fn set_clipboard_text(&mut self, text: &str) -> Result<EngineOutput, EngineError> {
+        self.host_clipboard = Some(text.to_owned());
+        let mut output = EngineOutput::default();
+        for session in self.session_ids() {
+            if let Some(connection) = self.connections.get_mut(&session) {
+                connection.compositor_mut().set_clipboard_text(text)?;
+                let _ = connection.compositor_mut().take_events();
+                let flushed = connection.flush()?;
+                if !flushed.is_empty() {
+                    output.extra_outgoing.push((session, flushed));
+                }
+            }
+        }
+        Ok(output)
     }
 
     pub fn session_ids(&self) -> Vec<SessionId> {
@@ -229,7 +317,7 @@ impl AndroidEngine {
             {
                 frames.push(surface.frames.pop_front().unwrap().1);
             }
-            surface.dirty.store(false, Ordering::Release);
+            surface.signal.mark_clean();
             frames
         };
         let time = self.millis();
@@ -243,6 +331,7 @@ impl AndroidEngine {
         }
         Ok(EngineOutput {
             outgoing: outgoing.freeze(),
+            extra_outgoing: Vec::new(),
             events: Vec::new(),
         })
     }
@@ -282,7 +371,7 @@ impl AndroidEngine {
             .get_mut(&key.session)
             .ok_or(EngineError::UnknownSession(key.session))?
             .compositor_mut()
-            .touch_motion(id, x, y, time);
+            .touch_motion(key.window, id, x, y, time);
         self.flush(key.session)
     }
 
@@ -424,7 +513,11 @@ impl AndroidEngine {
         if before > 0 || notify_remote {
             events.push(EngineEvent::SessionClosed { session });
         }
-        Ok(EngineOutput { outgoing, events })
+        Ok(EngineOutput {
+            outgoing,
+            extra_outgoing: Vec::new(),
+            events,
+        })
     }
 
     fn flush(&mut self, session: SessionId) -> Result<EngineOutput, EngineError> {
@@ -435,6 +528,7 @@ impl AndroidEngine {
             .flush()?;
         Ok(EngineOutput {
             outgoing,
+            extra_outgoing: Vec::new(),
             events: Vec::new(),
         })
     }
@@ -523,7 +617,8 @@ impl AndroidEngine {
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
                             surface.canvas.remove_layer(id);
                             surface.version += 1;
-                            surface.dirty.store(true, Ordering::Release);
+                            let version = surface.version;
+                            surface.signal.mark_dirty(version);
                         }
                     }
                     if self.windows.remove(&key).is_some() {
@@ -568,6 +663,30 @@ impl AndroidEngine {
                         }
                     }
                 }
+                CoreEvent::ClipboardChanged { source, mime_types } => {
+                    if let Some(_source_id) = source {
+                        let connection = self
+                            .connections
+                            .get_mut(&session)
+                            .ok_or(EngineError::UnknownSession(session))?;
+                        let outgoing = connection.request_clipboard_text()?;
+                        let mut bytes = BytesMut::from(output.outgoing.as_ref());
+                        bytes.extend_from_slice(&outgoing);
+                        output.outgoing = bytes.freeze();
+                    } else if mime_types.is_empty() {
+                        output.events.push(EngineEvent::ClipboardText {
+                            session,
+                            text: String::new(),
+                        });
+                    }
+                }
+                CoreEvent::ClipboardData { data, .. } => {
+                    let text = String::from_utf8_lossy(&data).into_owned();
+                    self.host_clipboard = Some(text.clone());
+                    output
+                        .events
+                        .push(EngineEvent::ClipboardText { session, text });
+                }
                 CoreEvent::Closed => {}
             }
         }
@@ -599,7 +718,7 @@ impl AndroidEngine {
         surface.version += 1;
         let version = surface.version;
         surface.frames.push_back((version, frame.id));
-        surface.dirty.store(true, Ordering::Release);
+        surface.signal.mark_dirty(version);
         Ok(())
     }
 }
@@ -660,6 +779,7 @@ mod tests {
                     height: 1,
                 }],
             }),
+            z_order: None,
         })
     }
 
@@ -745,6 +865,25 @@ mod tests {
                 window: 10
             })
             .is_some());
+    }
+
+    #[cfg(feature = "jni-check")]
+    #[test]
+    fn serializes_engine_events_in_kotlin_schema() {
+        let window = AndroidWindow {
+            key: SurfaceKey {
+                session: 1,
+                window: 2,
+            },
+            title: "Terminal".into(),
+            app_id: "org.waypipe.foot".into(),
+            width: 800,
+            height: 600,
+        };
+        assert_eq!(
+            serde_json::to_string(&EngineEvent::WindowUpsert(window)).unwrap(),
+            r#"{"type":"window_upsert","key":{"session":1,"window":2},"title":"Terminal","app_id":"org.waypipe.foot","width":800,"height":600}"#
+        );
     }
 
     #[test]

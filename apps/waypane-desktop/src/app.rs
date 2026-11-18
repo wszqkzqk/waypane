@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use waypane_core::{Connection, CoreEvent, WindowId};
 use waypane_render::{keys, DesktopRenderer};
@@ -23,6 +23,9 @@ pub struct App {
     finish_when_idle: bool,
     saw_session: bool,
     exit_code: u8,
+    system_clipboard: Option<arboard::Clipboard>,
+    clipboard_text: String,
+    last_clipboard_check: Instant,
 }
 
 impl App {
@@ -42,6 +45,9 @@ impl App {
             finish_when_idle: false,
             saw_session: false,
             exit_code: 0,
+            system_clipboard: arboard::Clipboard::new().ok(),
+            clipboard_text: String::new(),
+            last_clipboard_check: Instant::now(),
         }
     }
 
@@ -102,6 +108,8 @@ impl App {
         let (connections, renderer) = (&mut self.connections, &mut self.renderer);
         let connection = connections.get_mut(&session).unwrap();
         let mut closed = false;
+        let mut clipboard_data = None;
+        let mut clipboard_cleared = false;
         for event in batch.events {
             match event {
                 CoreEvent::WindowCreated(info) => renderer.window_created(session, info),
@@ -119,6 +127,21 @@ impl App {
                 CoreEvent::Frame(frame) => renderer
                     .apply_frame(event_loop, session, &frame, connection.client().resources())
                     .map_err(|error| error.to_string())?,
+                CoreEvent::ClipboardChanged { source, mime_types } => {
+                    if source.is_some() {
+                        let outgoing = connection
+                            .request_clipboard_text()
+                            .map_err(|error| error.to_string())?;
+                        if !outgoing.is_empty() && !self.manager.send(session, outgoing) {
+                            return Err("outbound queue is closed or full".to_string());
+                        }
+                    } else if mime_types.is_empty() {
+                        clipboard_cleared = true;
+                    }
+                }
+                CoreEvent::ClipboardData { data, .. } => {
+                    clipboard_data = Some(String::from_utf8_lossy(&data).into_owned());
+                }
                 CoreEvent::PipeAvailable { rid } => {
                     log::debug!("clipboard pipe available for RID {}", rid.0);
                 }
@@ -128,10 +151,63 @@ impl App {
                 }
             }
         }
+        let trailing = connection.flush().map_err(|error| error.to_string())?;
+        if !trailing.is_empty() && !self.manager.send(session, trailing) {
+            return Err("outbound queue is closed or full".to_string());
+        }
         if closed {
             self.disconnect(session);
+            return Ok(());
+        }
+        if clipboard_cleared {
+            self.clipboard_text.clear();
+            if let Some(clipboard) = self.system_clipboard.as_mut() {
+                let _ = clipboard.set_text(String::new());
+            }
+        }
+        if let Some(text) = clipboard_data {
+            self.publish_clipboard(text, true);
         }
         Ok(())
+    }
+
+    fn publish_clipboard(&mut self, text: String, update_system: bool) {
+        if text.len() > 16 * 1024 * 1024 {
+            log::warn!("ignoring clipboard payload larger than 16 MiB");
+            return;
+        }
+        self.clipboard_text = text.clone();
+        if update_system {
+            if let Some(clipboard) = self.system_clipboard.as_mut() {
+                if let Err(error) = clipboard.set_text(text.clone()) {
+                    log::debug!("failed to update system clipboard: {error}");
+                }
+            }
+        }
+        let manager = &self.manager;
+        for (id, connection) in &mut self.connections {
+            let _ = connection.compositor_mut().set_clipboard_text(&text);
+            let _ = connection.compositor_mut().take_events();
+            if let Ok(data) = connection.flush() {
+                manager.send(*id, data);
+            }
+        }
+    }
+
+    fn poll_system_clipboard(&mut self) {
+        if self.last_clipboard_check.elapsed() < Duration::from_millis(500) {
+            return;
+        }
+        self.last_clipboard_check = Instant::now();
+        let text = self
+            .system_clipboard
+            .as_mut()
+            .and_then(|clipboard| clipboard.get_text().ok());
+        if let Some(text) = text {
+            if text != self.clipboard_text {
+                self.publish_clipboard(text, false);
+            }
+        }
     }
 
     fn complete_presented(&mut self) {
@@ -340,6 +416,13 @@ impl ApplicationHandler<SessionEvent> for App {
             return;
         }
         self.flush(session);
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.poll_system_clipboard();
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            self.last_clipboard_check + Duration::from_millis(500),
+        ));
     }
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, _cause: winit::event::StartCause) {

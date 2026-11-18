@@ -7,7 +7,7 @@ mod android;
 
 pub use engine::{
     AndroidEngine, AndroidSurface, AndroidWindow, EngineError, EngineEvent, EngineOutput,
-    SurfaceKey,
+    SurfaceKey, SurfaceSignal,
 };
 pub use keycodes::android_keycode_to_evdev;
 pub use session::{ActorCommand, ActorHandle, SessionId};
