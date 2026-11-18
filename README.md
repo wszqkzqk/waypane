@@ -91,29 +91,24 @@ These upstream tests check SHM pixel replication, damage, reverse keymap file de
 two-way clipboard transfers, Unicode preedit/commit serials, xdg-toplevel lifecycle, and
 keyboard/pointer delivery against the original Waypipe implementation.
 
-### Android
+### CI builds and artifacts
 
-Requirements: JDK 17, Android SDK Platform 35, Build Tools 35.0.0, Android NDK r27, and
-`cargo-ndk`. The Rust target `aarch64-linux-android` must be installed.
+`.github/workflows/build.yml` runs the platform builds on GitHub-hosted runners so local
+development does not require Android, NDK, Gradle, or Windows SDK installations:
 
-Native check without an Android SDK installation:
+- `quality`: formatting and workspace Clippy, including the host-side `jni-check` bindings
+- `desktop`: workspace checks, tests, and release builds on macOS and Windows
+- `upstream-interop`: builds vendored Waypipe with only SHM/LZ4/Zstd support and runs all four
+  integration tests against it on Ubuntu
+- `android`: uses JDK 17, Gradle 8.9, NDK r27d, and cargo-ndk 4.1.2 to build the arm64
+  debug APK (`minSdk 26`, `targetSdk 35`)
 
-```sh
-cargo ndk -t arm64-v8a --platform 26 check \
-  -p waypane-android --features jni-check --locked
-```
+Workflow runs upload the desktop binaries as `waypane-desktop-<OS>-<ARCH>` and the APK as
+`waypane-android-debug-arm64`. Heavy SDK installations and their licenses live only on
+disposable CI runners.
 
-APK build (`minSdk 26`, `targetSdk 35`, arm64):
-
-```sh
-export ANDROID_NDK_HOME=/path/to/android-ndk-r27
-cd apps/android
-gradle :app:assembleDebug
-```
-
-The debug APK is written to `apps/android/app/build/outputs/apk/debug/app-debug.apk`.
-Accepting Android SDK licenses and installing SDK packages are separate user-controlled
-steps.
+Local development only needs a Rust toolchain for workspace checks and unit tests. The
+upstream integration tests remain opt-in when a host-native `waypipe` binary is available.
 
 ## Run over SSH
 
@@ -166,12 +161,12 @@ window is not counted as presented.
   automated run of the current code reached frame upload and `RedrawRequested`, but AppKit
   reported the 64x64 CLI-created window as `Occluded`, so that run did not claim a new on-screen
   presentation.
-- The current Android Rust/JNI code passes `cargo ndk` checking with NDK r27d for
-  `aarch64-linux-android` at API 26. The Kotlin APK has not yet been built here because
-  Android SDK package licenses require explicit acceptance, and no Android device is
-  connected for runtime verification.
-- `waypane-desktop` passes `cargo check` and Clippy with `-D warnings` for
-  `x86_64-pc-windows-msvc`. It has not yet been executed on a physical Windows host.
+- The Android Rust/JNI code passed `cargo ndk` checking with NDK r27d for
+  `aarch64-linux-android` at API 26 during development. The CI workflow builds the full APK;
+  that workflow has not run remotely yet, and no physical Android device has been tested.
+- `waypane-desktop` passed local `cargo check` and Clippy with `-D warnings` for
+  `x86_64-pc-windows-msvc`. Native Windows check, test, and release-build jobs are in CI and
+  have not run remotely yet; interactive behavior has not been verified on Windows.
 
 ## Known limitations
 

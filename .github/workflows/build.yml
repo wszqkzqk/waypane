@@ -1,38 +1,165 @@
-name: Build
+name: CI
 
 on:
   push:
-    branches: ["main"]
+    branches: [main]
   pull_request:
-    branches: ["main"]
+    branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
+  CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
 
 jobs:
-  desktop:
-    strategy:
-      matrix:
-        os: [windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+  quality:
+    name: Format and lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: quality
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --features jni-check --locked -- -D warnings
+
+  desktop:
+    name: Desktop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            binary: waypane-desktop
+          - os: windows-latest
+            binary: waypane-desktop.exe
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-${{ matrix.os }}
       - name: Check workspace
         run: cargo check --workspace --all-targets --locked
       - name: Run tests
         run: cargo test --workspace --locked
       - name: Build desktop application
         run: cargo build --release --locked -p waypane-desktop
-      - name: Upload binary
+      - name: Upload desktop binary
         uses: actions/upload-artifact@v4
         with:
-          name: waypane-desktop-${{ runner.os }}
-          path: target/release/waypane-desktop${{ runner.os == 'Windows' && '.exe' || '' }}
+          name: waypane-desktop-${{ runner.os }}-${{ runner.arch }}
+          path: target/release/${{ matrix.binary }}
           if-no-files-found: error
+          retention-days: 14
+
+  upstream-interop:
+    name: Upstream Waypipe interoperability
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: upstream-interop
+      - name: Install upstream build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            bindgen \
+            libclang-dev \
+            liblz4-dev \
+            libzstd-dev \
+            pkg-config
+      - name: Build upstream Waypipe without GPU or video
+        env:
+          WAYPIPE_VERSION: waypipe 0.11.3
+        run: |
+          cargo build \
+            --manifest-path vendor/waypipe/Cargo.toml \
+            --locked \
+            --release \
+            --no-default-features \
+            --features lz4,zstd \
+            --bin waypipe \
+            --target-dir target/upstream-waypipe
+          target/upstream-waypipe/release/waypipe --version
+      - name: Test wire protocol, SHM, files, and compression
+        env:
+          WAYPIPE_TEST_BINARY: ${{ github.workspace }}/target/upstream-waypipe/release/waypipe
+          WAYPIPE_TEST_COMPRESSIONS: none,lz4,zstd
+        run: cargo test -p waypipe-client --locked --test upstream_shm -- --ignored --nocapture
+      - name: Test clipboard, text input, and toplevel protocols
+        env:
+          WAYPIPE_TEST_BINARY: ${{ github.workspace }}/target/upstream-waypipe/release/waypipe
+        run: |
+          cargo test -p waypane-core --locked \
+            --test upstream_clipboard \
+            --test upstream_text_input \
+            --test upstream_toplevel \
+            -- --ignored --nocapture
+
+  android:
+    name: Android APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Install Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - name: Install cargo-ndk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk@4.1.2
+      - name: Install Android NDK r27d
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27d
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android-aarch64
+      - name: Build debug APK
+        working-directory: apps/android
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+        run: gradle --no-daemon --stacktrace :app:assembleDebug
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: waypane-android-debug-arm64
+          path: apps/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
