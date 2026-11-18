@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = [
+    "apps/waypane-desktop",
+    "crates/waypane-core",
+    "crates/waypipe-client",
+    "crates/waypane-render",
+    "crates/waypane-transport",
+]
+exclude = ["vendor/waypipe"]
+
+[workspace.package]
+edition = "2021"
+license = "GPL-3.0-only"
+rust-version = "1.87"

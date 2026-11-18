@@ -1,0 +1,38 @@
+name: Build
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  desktop:
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - name: Check workspace
+        run: cargo check --workspace --all-targets --locked
+      - name: Run tests
+        run: cargo test --workspace --locked
+      - name: Build desktop application
+        run: cargo build --release --locked -p waypane-desktop
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: waypane-desktop-${{ runner.os }}
+          path: target/release/waypane-desktop${{ runner.os == 'Windows' && '.exe' || '' }}
+          if-no-files-found: error
