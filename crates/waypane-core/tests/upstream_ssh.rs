@@ -64,7 +64,7 @@ impl TestSshd {
         fs::write(
             &config,
             format!(
-                "ListenAddress 127.0.0.1\nPort {port}\nHostKey {}\nAuthorizedKeysFile {}\nPidFile {}\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPubkeyAuthentication yes\nAllowAgentForwarding no\nAllowTcpForwarding no\nX11Forwarding no\nAllowStreamLocalForwarding yes\nSetEnv TMPDIR={}\nPrintMotd no\nLogLevel VERBOSE\n",
+                "ListenAddress 127.0.0.1\nPort {port}\nHostKey {}\nAuthorizedKeysFile {}\nPidFile {}\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPubkeyAuthentication yes\nAllowAgentForwarding no\nAllowTcpForwarding remote\nX11Forwarding no\nAllowStreamLocalForwarding yes\nSetEnv TMPDIR={}\nPrintMotd no\nLogLevel VERBOSE\n",
                 host_key.display(),
                 root.join("authorized_keys").display(),
                 root.join("sshd.pid").display(),

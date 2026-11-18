@@ -133,8 +133,9 @@ upstream integration tests remain opt-in when a host-native `waypipe` binary is 
 
 ## Run over SSH
 
-The application host needs `waypipe` and `sshd` with OpenSSH Unix-socket forwarding enabled.
-Waypane automatically executes `waypipe server -- <command>` remotely.
+The application host needs `waypipe` and `sshd` with OpenSSH remote Unix-socket forwarding
+enabled (`AllowStreamLocalForwarding yes` and `AllowTcpForwarding yes` or `remote`). Waypane
+automatically executes `waypipe server -- <command>` remotely.
 
 ```sh
 cargo run -p waypane-desktop -- \
