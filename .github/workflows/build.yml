@@ -93,7 +93,13 @@ jobs:
             pkg-config
       - name: Build upstream Waypipe without GPU or video
         env:
-          WAYPIPE_VERSION: waypipe 0.11.3
+          WAYPIPE_VERSION: |-
+            waypipe 0.11.3
+            features:
+              lz4: true
+              zstd: true
+              dmabuf: false
+              video: false
         run: |
           cargo build \
             --manifest-path vendor/waypipe/Cargo.toml \
@@ -136,6 +142,11 @@ jobs:
         with:
           distribution: temurin
           java-version: ${{ steps.jdk.outputs.version }}
+      - name: Set up Android SDK 37
+        uses: android-actions/setup-android@v4
+        with:
+          packages: "platform-tools platforms;android-37 build-tools;36.0.0"
+          log-accepted-android-sdk-licenses: false
       - name: Install current Gradle
         uses: gradle/actions/setup-gradle@v6
         with:
@@ -151,14 +162,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: android-aarch64
-      - name: Ensure Android SDK 37
-        run: |
-          test -n "${ANDROID_NDK_LATEST_HOME:-}"
-          yes | sdkmanager --licenses >/dev/null
-          sdkmanager "platforms;android-37" "build-tools;36.0.0"
       - name: Build debug APK with the runner's latest NDK
         working-directory: apps/android
         run: |
+          test -n "${ANDROID_NDK_LATEST_HOME:-}"
           export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           export ANDROID_NDK_ROOT="$ANDROID_NDK_LATEST_HOME"
           cargo ndk --version
