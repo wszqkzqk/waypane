@@ -43,6 +43,9 @@ android {
         applicationId = "org.waypane.app"
         minSdk = 26
         targetSdk = 37
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
         versionCode = 1
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
