@@ -532,7 +532,8 @@ async fn exec_capture(
                 output.extend_from_slice(&data);
             }
             ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
-            ChannelMsg::Close | ChannelMsg::Eof => break,
+            ChannelMsg::Eof => continue,
+            ChannelMsg::Close => break,
             _ => {}
         }
     }
@@ -613,7 +614,8 @@ fn watch_remote_command(mut channel: Channel<Msg>) -> mpsc::Receiver<CommandEven
                     status = Some(exit_status);
                     continue;
                 }
-                ChannelMsg::Close | ChannelMsg::Eof => break,
+                ChannelMsg::Eof => continue,
+                ChannelMsg::Close => break,
                 _ => continue,
             };
             if sender.send(event).await.is_err() {
