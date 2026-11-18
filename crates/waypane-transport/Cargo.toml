@@ -6,3 +6,11 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+bytes = "1"
+russh = { version = "0.63.1", default-features = false, features = ["ring", "rsa"] }
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+waypipe-client = { path = "../waypipe-client" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
