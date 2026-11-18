@@ -14,16 +14,18 @@ daemon is not required.
   pipes, outbound virtual files, and LZ4/Zstd compression, with allocation and size limits
 - `crates/waypane-core`: UI-independent Wayland compositor state machine generated from the
   official `wayland.xml`, `xdg-shell.xml`, and `text-input-v3.xml` definitions
-- `crates/waypane-transport`: `russh` authentication and host-key verification, OpenSSH
-  `streamlocal` forwarding, and automatic remote `waypipe server` startup
+- `crates/waypane-transport`: `russh` authentication, SHA-256 host-key verification and TOFU,
+  OpenSSH `streamlocal` forwarding, remote temporary-directory discovery, and automatic
+  `waypipe server` startup
 - `crates/waypane-render`: damage-aware software layer composition and `wgpu` textures; the
   `desktop` feature adds `winit` native windows
 - `apps/waypane-desktop`: desktop CLI, multi-session routing, native windows, input, and
   system clipboard synchronization
 - `crates/waypane-android`: platform-independent `AndroidEngine`, single-threaded Tokio
-  actor, JNI bindings, and `ANativeWindow`/`wgpu` presentation
-- `apps/android`: Kotlin/Jetpack Compose Android host with connection settings, window
-  switching, `RemoteSurfaceView`, touch, soft keyboard, and clipboard integration
+  actor, handle-registry/Arc JNI lifecycle, and `ANativeWindow`/`wgpu` presentation
+- `apps/android`: Kotlin/Jetpack Compose Android host with connection settings, host-key
+  confirmation, private-key management, window switching, `RemoteSurfaceView`, touch, soft
+  keyboard, and clipboard integration
 - `vendor/waypipe`: unmodified upstream Waypipe `v0.11.3`, used as the protocol reference and
   integration-test peer
 
@@ -32,9 +34,11 @@ space, and bounded I/O queues. Native windows are indexed by `(SessionId, Window
 concurrent clients cannot collide.
 
 The Android actor owns all connection and engine state on a current-thread Tokio runtime.
-Rendering runs on a dedicated `RenderThread`; dirty-frame waits use versioned condition
-variables, new frames are aligned to VSync with `Choreographer`, and static content does not
-run a 60 Hz polling loop.
+JNI calls resolve opaque IDs through a synchronized registry into `Arc` snapshots, so an
+in-flight call keeps state alive while `nativeDestroy` removes its public handle. GPU access
+is serialized by `Mutex<GpuRenderer>`. Rendering runs on a dedicated `RenderThread`; dirty-frame
+waits use versioned condition variables, new frames are aligned to VSync with `Choreographer`,
+and static content does not run a 60 Hz polling loop.
 
 ## Implemented
 
@@ -61,9 +65,16 @@ run a 60 Hz polling loop.
 - `text-input-v3` commit-count serials, surrounding text, Unicode preedit and commit strings,
   plus Android soft-keyboard integration; ASCII key and delete fallback is used when the
   remote application does not support `text-input-v3`
-- SSH public-key or password authentication and strict `known_hosts` verification by default
-- Android lifecycle-safe surface attach/detach, native-handle single destruction, SAF private
-  key import into owner-only app-private storage, and backup exclusion for host keys and keys
+- SSH password or public-key authentication, including encrypted private keys with an
+  in-memory passphrase, and strict `known_hosts` verification by default
+- Host-key TOFU: desktop `--accept-new-host-key` saves only unknown keys and still rejects
+  changed keys; Android displays the SHA-256 fingerprint before saving a new key and requires
+  explicit confirmation before replacing a changed key
+- Automatic writable remote directory discovery (`TMPDIR`, then `XDG_RUNTIME_DIR`, then `/tmp`)
+  for Termux and Linux, with unique length-bounded sockets and explicit `--remote-socket` or
+  Android remote-socket overrides; application commands remain separate from Waypipe options
+- Android atomic SAF private-key import with a 64 KiB limit, owner-only app-private storage,
+  backup exclusion for keys and `known_hosts`, and a true delete-imported-key action
 
 ## Build and test
 
@@ -85,11 +96,17 @@ WAYPIPE_TEST_BINARY=/path/to/waypipe \
   cargo test -p waypane-core --locked \
     --test upstream_clipboard --test upstream_text_input --test upstream_toplevel \
     -- --ignored --nocapture
+
+WAYPIPE_TEST_BINARY=/path/to/waypipe WAYPIPE_SSHD=/usr/sbin/sshd \
+  cargo test -p waypane-core --locked --test upstream_ssh -- --ignored --nocapture
 ```
 
 These upstream tests check SHM pixel replication, damage, reverse keymap file descriptors,
 two-way clipboard transfers, Unicode preedit/commit serials, xdg-toplevel lifecycle, and
-keyboard/pointer delivery against the original Waypipe implementation.
+keyboard/pointer delivery against the original Waypipe implementation. `upstream_ssh` also
+starts an isolated `sshd`, logs in with an encrypted Ed25519 private key, exercises
+interactive TOFU, discovers a Termux-style `TMPDIR`, and drives two real Wayland frames over
+SSH `streamlocal` forwarding. It requires `ssh-keygen` and a `/run/sshd` directory on Ubuntu.
 
 ### CI builds and artifacts
 
@@ -98,8 +115,8 @@ development does not require Android, NDK, Gradle, or Windows SDK installations:
 
 - `quality`: formatting and workspace Clippy, including the host-side `jni-check` bindings
 - `desktop`: workspace checks, tests, and release builds on macOS and Windows
-- `upstream-interop`: builds vendored Waypipe with only SHM/LZ4/Zstd support and runs all four
-  integration tests against it on Ubuntu
+- `upstream-interop`: builds vendored Waypipe with only SHM/LZ4/Zstd support and runs all
+  five integration tests against it on Ubuntu, including real `sshd` plus encrypted-key auth
 - `android`: resolves the latest LTS JDK and uses current Gradle, the runner's latest NDK,
   and the latest cargo-ndk to build the AGP 9 built-in-Kotlin arm64 APK (`minSdk 26`,
   `targetSdk 37`)
@@ -134,9 +151,20 @@ cargo run -p waypane-desktop -- \
 
 For local Termux, start `sshd` (normally on port 8022), configure public-key or password
 authentication, then connect to `127.0.0.1:8022` from either the desktop CLI or the Android
-app. Host keys are verified against `~/.ssh/known_hosts` unless `--known_hosts` is supplied.
-`--accept-new-host-key` disables verification of unknown or unreadable host keys and should
-only be used deliberately. The Android app has an explicit toggle for the same trust choice.
+app. Waypane discovers Termux's `$TMPDIR` over SSH automatically, so `/tmp` is not required.
+For a fixed path, both desktop and Android accept an explicit remote socket, for example:
+
+```sh
+waypane-desktop --ssh "$(whoami)@127.0.0.1:8022" \
+  --remote-socket /data/data/com.termux/files/usr/tmp/waypane.sock -- foot
+```
+
+Host keys are verified against `~/.ssh/known_hosts` unless `--known_hosts` is supplied.
+`--accept-new-host-key` saves unknown host keys to that file but never accepts a changed key.
+On Android, the first connection to a host displays its algorithm and SHA-256 fingerprint;
+choosing **Trust and save** records it in app-private `known_hosts`. A changed fingerprint
+shows an explicit warning before **Replace saved key** is allowed. The Android command field
+accepts only the remote application and its arguments; Waypipe flags are managed by Waypane.
 
 ## Local integration testing
 
