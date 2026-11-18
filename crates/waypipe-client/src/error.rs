@@ -1,7 +1,7 @@
 use std::fmt;
 
 use crate::header::Compression;
-use crate::shm::Rid;
+use crate::store::Rid;
 use crate::wire::MessageType;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

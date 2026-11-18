@@ -1,9 +1,10 @@
 use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::error::Error;
-use crate::shm::Rid;
+use crate::store::Rid;
 
 pub const DEFAULT_MAX_FRAME_SIZE: usize = 64 * 1024 * 1024;
+const WAYPIPE_FD_TAG: u32 = 1 << 11;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageType {
@@ -162,7 +163,11 @@ impl WaylandMessage {
     }
 
     pub fn opcode(&self) -> u16 {
-        (u32::from_le_bytes(self.raw[4..8].try_into().unwrap()) & 0xffff) as u16
+        (u32::from_le_bytes(self.raw[4..8].try_into().unwrap()) & 0xff) as u16
+    }
+
+    pub fn has_file_descriptors(&self) -> bool {
+        u32::from_le_bytes(self.raw[4..8].try_into().unwrap()) & WAYPIPE_FD_TAG != 0
     }
 
     pub fn payload(&self) -> &[u8] {
@@ -171,6 +176,10 @@ impl WaylandMessage {
 
     pub fn as_bytes(&self) -> &[u8] {
         &self.raw
+    }
+
+    pub fn into_bytes(self) -> Bytes {
+        self.raw
     }
 }
 
@@ -227,9 +236,60 @@ pub fn encode_close() -> Bytes {
     encode_frame(MessageType::Close, &0u32.to_le_bytes()).unwrap()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtocolMessage {
+    bytes: Bytes,
+    fds: Vec<Rid>,
+}
+
+impl ProtocolMessage {
+    pub fn new(bytes: Bytes) -> Result<Self, Error> {
+        Self::with_fds(bytes, Vec::new())
+    }
+
+    pub fn with_fds(bytes: Bytes, fds: Vec<Rid>) -> Result<Self, Error> {
+        let messages = parse_wayland_messages(bytes.clone())?;
+        if messages.len() != 1 {
+            return Err(Error::InvalidWaylandMessage(format!(
+                "expected one message, got {}",
+                messages.len()
+            )));
+        }
+        if messages[0].has_file_descriptors() {
+            return Err(Error::InvalidWaylandMessage(
+                "FD tags are assigned when ProtocolMessage is encoded".to_string(),
+            ));
+        }
+        Ok(Self { bytes, fds })
+    }
+}
+
 pub fn encode_protocol(messages: Bytes) -> Result<Bytes, Error> {
-    parse_wayland_messages(messages.clone())?;
+    let parsed = parse_wayland_messages(messages.clone())?;
+    if parsed.iter().any(WaylandMessage::has_file_descriptors) {
+        return Err(Error::InvalidWaylandMessage(
+            "FD-tagged message requires ProtocolMessage RIDs".to_string(),
+        ));
+    }
     encode_frame(MessageType::Protocol, &messages)
+}
+
+pub fn encode_protocol_messages(messages: &[ProtocolMessage]) -> Result<(Bytes, Vec<Rid>), Error> {
+    let mut bytes = BytesMut::new();
+    let mut rids = Vec::new();
+    for message in messages {
+        if message.fds.is_empty() {
+            bytes.extend_from_slice(&message.bytes);
+        } else {
+            let mut tagged = message.bytes.to_vec();
+            let header = u32::from_le_bytes(tagged[4..8].try_into().unwrap());
+            let header = (header & !0xff00) | WAYPIPE_FD_TAG;
+            tagged[4..8].copy_from_slice(&header.to_le_bytes());
+            bytes.extend_from_slice(&tagged);
+            rids.extend_from_slice(&message.fds);
+        }
+    }
+    Ok((encode_frame(MessageType::Protocol, &bytes)?, rids))
 }
 
 pub fn encode_rids(rids: &[Rid]) -> Result<Bytes, Error> {

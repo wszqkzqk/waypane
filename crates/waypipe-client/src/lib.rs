@@ -1,19 +1,24 @@
 mod client;
+mod compression;
 mod error;
 mod header;
-mod shm;
+mod store;
 mod wire;
 
 pub use client::{Client, ClientBatch, ClientConfig, ClientEvent};
+pub use compression::DEFAULT_MAX_SHM_TRANSFER_SIZE;
 pub use error::Error;
 pub use header::{
     Compression, ConnectionHeader, VideoCodec, MIN_PROTOCOL_VERSION, WAYPIPE_PROTOCOL_VERSION,
 };
-pub use shm::{Rid, ShmStore, DEFAULT_MAX_SHM_FILE_SIZE};
+pub use store::{
+    PipeAccess, PipeOpenKind, PipeRead, ResourceStore, Rid, DEFAULT_MAX_PIPE_BUFFER_SIZE,
+    DEFAULT_MAX_SHM_FILE_SIZE, DEFAULT_MAX_TOTAL_SHM_SIZE,
+};
 pub use wire::{
-    decode_rids, encode_close, encode_frame, encode_protocol, encode_rids, encode_version,
-    parse_wayland_messages, FrameDecoder, MessageType, RawFrame, WaylandMessage,
-    DEFAULT_MAX_FRAME_SIZE,
+    decode_rids, encode_close, encode_frame, encode_protocol, encode_protocol_messages,
+    encode_rids, encode_version, parse_wayland_messages, FrameDecoder, MessageType,
+    ProtocolMessage, RawFrame, WaylandMessage, DEFAULT_MAX_FRAME_SIZE,
 };
 
 #[cfg(test)]
@@ -21,6 +26,7 @@ mod tests {
     #![allow(clippy::single_range_in_vec_init)]
 
     use std::ops::Range;
+    use std::sync::Arc;
 
     use bytes::Bytes;
 
@@ -157,24 +163,24 @@ mod tests {
         assert_eq!(events[6], ClientEvent::ShmExtended { rid, size: 80 });
         assert_eq!(events[7], ClientEvent::Closed);
 
-        let data = client.shm().data(rid).unwrap();
+        let data = client.resources().data(rid).unwrap();
         assert_eq!(&data[..4], &[1, 2, 3, 4]);
         assert_eq!(&data[4..12], &[20, 21, 22, 23, 9, 10, 11, 12]);
         assert_eq!(&data[12..68], &[0; 56]);
         assert_eq!(&data[68..72], &[90, 91, 92, 93]);
         assert_eq!(&data[72..], &[0; 8]);
         assert_eq!(
-            client.shm_mut().take_damage(rid),
+            client.resources_mut().take_damage(rid),
             Some(vec![Range { start: 0, end: 12 }, 68..72])
         );
-        assert_eq!(client.shm_mut().take_damage(rid), Some(Vec::new()));
+        assert_eq!(client.resources_mut().take_damage(rid), Some(Vec::new()));
         assert!(client.is_closed());
         assert_eq!(client.receive(&[]), Err(Error::ConnectionClosed));
     }
 
     #[test]
     fn encodes_outgoing_protocol_with_padding() {
-        let client = negotiated_client();
+        let mut client = negotiated_client();
         let mut messages = get_registry().to_vec();
         messages.extend_from_slice(&[1, 0, 0, 0, 0, 0, 12, 0, 3, 0, 0, 0]);
 
@@ -223,14 +229,16 @@ mod tests {
         open.extend_from_slice(&1i32.to_le_bytes());
         open.extend_from_slice(&8i32.to_le_bytes());
         push_frame(&mut input, MessageType::OpenFile, &open);
-        push_frame(&mut input, MessageType::OpenIrPipe, &open[..4]);
+        push_frame(&mut input, MessageType::OpenIrPipe, &2i32.to_le_bytes());
         input.extend_from_slice(&encode_version(WAYPIPE_PROTOCOL_VERSION));
 
         assert!(client.receive(&input[..12]).is_ok());
-        assert_eq!(
-            client.receive(&input[12..20]),
-            Err(Error::UnsupportedFrame(MessageType::OpenIrPipe))
-        );
+        let opened = client.receive(&input[12..20]).unwrap();
+        assert!(matches!(
+            &opened.events[..],
+            [ClientEvent::PipeOpened { rid: Rid(2), access }]
+                if access.can_write && !access.can_read
+        ));
         assert!(matches!(
             client.receive(&input[20..]),
             Err(Error::InvalidFrame(_))
@@ -241,7 +249,7 @@ mod tests {
     fn rejects_malformed_updates_without_panicking() {
         let mut client = negotiated_client();
         let rid = Rid(1);
-        client.shm_mut().open_file(rid, 64).unwrap();
+        client.resources_mut().open_file(rid, 64).unwrap();
 
         let mut fill = Vec::new();
         fill.extend_from_slice(&rid.0.to_le_bytes());
@@ -274,7 +282,7 @@ mod tests {
 
     #[test]
     fn enforces_size_limits_and_rid_invariants() {
-        let mut store = ShmStore::new(64);
+        let mut store = ResourceStore::new(64, 16, 128);
         assert!(matches!(
             store.open_file(Rid(1), 65),
             Err(Error::InvalidFrame(_))
@@ -287,20 +295,83 @@ mod tests {
         let rid = Rid(1);
         store.open_file(rid, 64).unwrap();
         assert_eq!(store.open_file(rid, 64), Err(Error::DuplicateRid(rid)));
-        store.inject(rid).unwrap();
-        assert!(matches!(store.inject(rid), Err(Error::InvalidFrame(_))));
+        store.inject_remote(rid).unwrap();
+        assert!(matches!(
+            store.inject_remote(rid),
+            Err(Error::InvalidFrame(_))
+        ));
         assert!(matches!(
             store.extend_file(rid, 32),
             Err(Error::InvalidFrame(_))
         ));
         assert_eq!(
-            store.apply_diff(Rid(2), &[0; 8]),
+            store.apply_diff(Rid(2), &[0; 8], Compression::None),
             Err(Error::UnknownRid(Rid(2)))
         );
 
         let mut decoder = FrameDecoder::new(16);
         decoder.push(&encode_frame(MessageType::BufferFill, &[0; 16]).unwrap());
         assert_eq!(decoder.next_frame(), Err(Error::FrameTooLarge(20)));
+    }
+
+    #[test]
+    fn outgoing_files_and_pipes_round_trip_in_wire_order() {
+        for compression in [Compression::None, Compression::Lz4, Compression::Zstd] {
+            let config = ClientConfig {
+                preferred_compression: compression,
+                ..ClientConfig::default()
+            };
+            let mut sender = Client::new(config);
+            sender.receive(&server_header(compression, true)).unwrap();
+            let mut receiver = Client::new(config);
+            receiver.receive(&server_header(compression, true)).unwrap();
+
+            let data: Arc<[u8]> = (0..600_000)
+                .map(|index| (index % 251) as u8)
+                .collect::<Vec<_>>()
+                .into();
+            let file = sender.create_readonly_file(data.clone()).unwrap();
+            let pipe = sender.create_pipe(PipeOpenKind::IW).unwrap();
+            sender.write_pipe(pipe, b"pipe payload").unwrap();
+            sender.close_pipe_write(pipe).unwrap();
+            let wire = sender
+                .encode_protocol_with_rids(get_registry(), &[file, pipe])
+                .unwrap();
+
+            let mut decoder = FrameDecoder::new(DEFAULT_MAX_FRAME_SIZE);
+            decoder.push(&wire);
+            let mut kinds = Vec::new();
+            while let Some(frame) = decoder.next_frame().unwrap() {
+                kinds.push(frame.kind);
+            }
+            assert_eq!(
+                kinds,
+                vec![
+                    MessageType::OpenFile,
+                    MessageType::BufferFill,
+                    MessageType::BufferFill,
+                    MessageType::BufferFill,
+                    MessageType::OpenIwPipe,
+                    MessageType::PipeTransfer,
+                    MessageType::PipeShutdownW,
+                    MessageType::InjectRids,
+                    MessageType::Protocol,
+                ]
+            );
+
+            let received = receiver.receive(&wire).unwrap();
+            assert_eq!(receiver.resources().data(file), Some(data.as_ref()));
+            let read = receiver.resources_mut().read_pipe(pipe, 4096).unwrap();
+            assert_eq!(read.data, b"pipe payload");
+            assert!(read.eof);
+            assert!(received.events.iter().any(|event| matches!(
+                event,
+                ClientEvent::Protocol(messages)
+                    if messages.len() == 1
+                        && messages[0].has_file_descriptors()
+                        && messages[0].opcode() == 1
+            )));
+        }
     }
 
     #[test]

@@ -1,8 +1,10 @@
+import array
 import os
 import socket
 import struct
 import tempfile
 
+KEYMAP = b'xkb_keymap { xkb_keycodes { include "evdev" }; };'
 runtime_dir = os.environ["XDG_RUNTIME_DIR"]
 display = os.environ["WAYLAND_DISPLAY"]
 path = display if display.startswith("/") else os.path.join(runtime_dir, display)
@@ -20,7 +22,7 @@ def sync(callback_id):
     sock.sendall(message(1, 0, struct.pack("<I", callback_id)))
 
 
-def wait_for_done(callback_id):
+def receive():
     while True:
         while len(buffer) >= 8:
             object_id, header = struct.unpack_from("<II", buffer)
@@ -28,31 +30,78 @@ def wait_for_done(callback_id):
             if len(buffer) < length:
                 break
             opcode = header & 0xFFFF
+            payload = bytes(buffer[8:length])
             del buffer[:length]
-            if object_id == callback_id and opcode == 0:
-                return
-        chunk = sock.recv(65536)
-        if not chunk:
-            raise RuntimeError(f"Wayland socket closed before callback {callback_id}")
-        buffer.extend(chunk)
+            yield object_id, opcode, payload, []
+        data, ancillary, _, _ = sock.recvmsg(65536, socket.CMSG_SPACE(64 * array.array("i").itemsize))
+        if not data:
+            raise RuntimeError("Wayland socket closed")
+        buffer.extend(data)
+        descriptors = []
+        for level, kind, cmsg in ancillary:
+            if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                ints = array.array("i")
+                ints.frombytes(cmsg[: len(cmsg) - (len(cmsg) % ints.itemsize)])
+                descriptors.extend(ints)
+        if descriptors:
+            object_id, header = struct.unpack_from("<II", buffer)
+            length = header >> 16
+            if len(buffer) >= length:
+                opcode = header & 0xFFFF
+                payload = bytes(buffer[8:length])
+                del buffer[:length]
+                yield object_id, opcode, payload, descriptors
+
+
+def wait_for_done(callback_id):
+    for object_id, opcode, _, descriptors in receive():
+        for fd in descriptors:
+            os.close(fd)
+        if object_id == callback_id and opcode == 0:
+            return
+
+
+def bind(registry, name, interface, version, object_id):
+    encoded = interface.encode() + b"\0"
+    encoded += b"\0" * ((4 - len(encoded) % 4) % 4)
+    payload = struct.pack("<II", name, len(interface) + 1) + encoded + struct.pack("<II", version, object_id)
+    sock.sendall(message(registry, 0, payload))
 
 
 sock.sendall(message(1, 1, struct.pack("<I", 2)))
 sync(3)
 wait_for_done(3)
 
-interface = b"wl_shm\0"
-padding = b"\0" * ((4 - len(interface) % 4) % 4)
-bind = struct.pack("<II", 2, len(interface)) + interface + padding + struct.pack("<II", 1, 4)
-sock.sendall(message(2, 0, bind))
+bind(2, 2, "wl_shm", 1, 4)
 sync(5)
 wait_for_done(5)
+
+bind(2, 3, "wl_seat", 7, 12)
+sock.sendall(message(12, 1, struct.pack("<I", 13)))
+sync(14)
+for object_id, opcode, payload, descriptors in receive():
+    if object_id == 13 and opcode == 0:
+        keymap_format, keymap_size = struct.unpack("<II", payload)
+        assert keymap_format == 1
+        assert len(descriptors) == 1
+        with os.fdopen(descriptors[0], "rb") as keymap:
+            assert keymap.read() == KEYMAP[:keymap_size]
+        break
+    for fd in descriptors:
+        os.close(fd)
+else:
+    raise RuntimeError("keymap stream ended unexpectedly")
+wait_for_done(14)
 
 with tempfile.TemporaryFile() as pool:
     pool.write(bytes(range(256)))
     pool.flush()
     create_pool = message(4, 0, struct.pack("<Ii", 6, 256))
-    sock.sendmsg([create_pool], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, struct.pack("@i", pool.fileno()))])
+    rights = array.array("i", [pool.fileno()])
+    sock.sendmsg(
+        [create_pool],
+        [(socket.SOL_SOCKET, socket.SCM_RIGHTS, rights.tobytes())],
+    )
     sock.sendall(message(6, 0, struct.pack("<IiiiiI", 7, 0, 4, 4, 16, 0)))
     sync(8)
     wait_for_done(8)
