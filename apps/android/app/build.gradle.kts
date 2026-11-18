@@ -71,7 +71,7 @@ android {
     }
 
     sourceSets.getByName("main") {
-        jniLibs.directories.add(rustJniLibs.get().asFile)
+        jniLibs.directories.add(rustJniLibs.get().asFile.absolutePath)
     }
 }
 
