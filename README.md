@@ -191,4 +191,4 @@ branch.
 
 ## License
 
-GPL-3.0-only for Waypane's own code. Vendored dependencies retain their own licenses.
+GPL-3.0-or-later for Waypane's own code. Vendored dependencies retain their own licenses.
