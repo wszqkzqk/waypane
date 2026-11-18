@@ -142,6 +142,7 @@ impl App {
                 CoreEvent::ClipboardData { data, .. } => {
                     clipboard_data = Some(String::from_utf8_lossy(&data).into_owned());
                 }
+                CoreEvent::TextInputState { .. } => {}
                 CoreEvent::PipeAvailable { rid } => {
                     log::debug!("clipboard pipe available for RID {}", rid.0);
                 }
@@ -404,6 +405,7 @@ impl ApplicationHandler<SessionEvent> for App {
                     .key(key, event.state == ElementState::Pressed, time)
             }
             WindowEvent::RedrawRequested => {
+                log::trace!("received redraw request for native window {id:?}");
                 self.renderer.render(id);
                 self.complete_presented();
                 return;

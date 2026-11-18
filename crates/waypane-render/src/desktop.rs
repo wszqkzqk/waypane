@@ -138,11 +138,13 @@ impl NativeWindow {
             );
         }
         self.window.request_redraw();
+        log::trace!("queued redraw for remote frame {}", frame.id);
         Ok(())
     }
 
     fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> bool {
         let Some(texture) = &self.texture else {
+            log::trace!("skipping redraw before the first texture upload");
             return false;
         };
         let frame = match self.surface.get_current_texture() {
@@ -150,9 +152,13 @@ impl NativeWindow {
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
             wgpu::CurrentSurfaceTexture::Outdated => {
                 self.surface.configure(device, &self.config);
+                self.window.request_redraw();
                 return false;
             }
-            _ => return false,
+            status => {
+                log::debug!("surface texture unavailable: {status:?}");
+                return false;
+            }
         };
         let source = texture.create_view(&Default::default());
         let target = frame.texture.create_view(&Default::default());
@@ -160,6 +166,7 @@ impl NativeWindow {
         self.blitter.copy(device, &mut encoder, &source, &target);
         queue.submit([encoder.finish()]);
         queue.present(frame);
+        log::trace!("presented native frame");
         true
     }
 
