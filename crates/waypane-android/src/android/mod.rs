@@ -412,6 +412,68 @@ pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeKey(
 }
 
 #[no_mangle]
+pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeCommitText(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    session: jlong,
+    window: jint,
+    value: JString<'_>,
+) -> jboolean {
+    jni_guard!(env, env, jboolean, {
+        let text = text(env, &value)?;
+        Ok(jb(state(handle)?.actor.send(ActorCommand::CommitText(
+            key(session, window)?,
+            text,
+        ))))
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeSetPreeditText(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    session: jlong,
+    window: jint,
+    value: JString<'_>,
+    cursor_begin: jint,
+    cursor_end: jint,
+) -> jboolean {
+    jni_guard!(env, env, jboolean, {
+        let text = text(env, &value)?;
+        let text = (!text.is_empty()).then_some(text);
+        Ok(jb(state(handle)?.actor.send(ActorCommand::SetPreedit(
+            key(session, window)?,
+            text,
+            cursor_begin,
+            cursor_end,
+        ))))
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeDeleteSurroundingText(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    session: jlong,
+    window: jint,
+    before_length: jint,
+    after_length: jint,
+) -> jboolean {
+    jni_guard!(env, env, jboolean, {
+        let before_length =
+            u32::try_from(before_length).map_err(|_| "invalid before_length".to_string())?;
+        let after_length =
+            u32::try_from(after_length).map_err(|_| "invalid after_length".to_string())?;
+        Ok(jb(state(handle)?.actor.send(
+            ActorCommand::DeleteSurrounding(key(session, window)?, before_length, after_length),
+        )))
+    })
+}
+
+#[no_mangle]
 pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeSetClipboardText(
     mut env: EnvUnowned<'_>,
     _class: JClass<'_>,

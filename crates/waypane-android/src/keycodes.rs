@@ -77,6 +77,61 @@ pub fn android_keycode_to_evdev(code: i32) -> Option<u32> {
     })
 }
 
+pub fn ascii_to_evdev(text: &str) -> Option<Vec<(u32, bool)>> {
+    const LETTERS: [u32; 26] = [
+        30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50, 49, 24, 25, 16, 19, 31, 20, 22, 47, 17,
+        45, 21, 44,
+    ];
+    let mut keys = Vec::new();
+    for character in text.chars() {
+        let key = match character {
+            'a'..='z' => (LETTERS[(character as u8 - b'a') as usize], false),
+            'A'..='Z' => (LETTERS[(character as u8 - b'A') as usize], true),
+            '0' => (11, false),
+            '1'..='9' => (u32::from(character as u8 - b'0' + 1), false),
+            ' ' => (57, false),
+            '\n' | '\r' => (28, false),
+            '\t' => (15, false),
+            '\u{8}' => (14, false),
+            '-' => (12, false),
+            '=' => (13, false),
+            '[' => (26, false),
+            ']' => (27, false),
+            '\\' => (43, false),
+            ';' => (39, false),
+            '\'' => (40, false),
+            '`' => (41, false),
+            ',' => (51, false),
+            '.' => (52, false),
+            '/' => (53, false),
+            '!' => (2, true),
+            '@' => (3, true),
+            '#' => (4, true),
+            '$' => (5, true),
+            '%' => (6, true),
+            '^' => (7, true),
+            '&' => (8, true),
+            '*' => (9, true),
+            '(' => (10, true),
+            ')' => (11, true),
+            '_' => (12, true),
+            '+' => (13, true),
+            '{' => (26, true),
+            '}' => (27, true),
+            '|' => (43, true),
+            ':' => (39, true),
+            '"' => (40, true),
+            '~' => (41, true),
+            '<' => (51, true),
+            '>' => (52, true),
+            '?' => (53, true),
+            _ => return None,
+        };
+        keys.push(key);
+    }
+    Some(keys)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,5 +148,10 @@ mod tests {
         assert_eq!(android_keycode_to_evdev(8), Some(2));
         assert_eq!(android_keycode_to_evdev(16), Some(10));
         assert_eq!(android_keycode_to_evdev(999), None);
+        assert_eq!(
+            ascii_to_evdev("aB9!"),
+            Some(vec![(30, false), (48, true), (10, false), (2, true)])
+        );
+        assert_eq!(ascii_to_evdev("你好"), None);
     }
 }

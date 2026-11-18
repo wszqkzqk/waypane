@@ -9,6 +9,7 @@ use waypane_core::{Connection, CoreEvent, Frame, Point, Size, WindowId, WindowKi
 use waypane_render::{Canvas, ImageError};
 use waypipe_client::{ClientConfig, Compression};
 
+use crate::keycodes::ascii_to_evdev;
 use crate::session::SessionId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -163,6 +164,8 @@ pub enum EngineError {
     UnknownSurface(SurfaceKey),
     #[error("surface {0:?} has no rendered frame")]
     EmptySurface(SurfaceKey),
+    #[error("text input rejected: {0}")]
+    TextInput(String),
 }
 
 struct PopupInfo {
@@ -475,6 +478,94 @@ impl AndroidEngine {
         self.flush(key.session)
     }
 
+    pub fn commit_text(
+        &mut self,
+        key: SurfaceKey,
+        text: &str,
+    ) -> Result<EngineOutput, EngineError> {
+        if text.is_empty() {
+            return self.flush(key.session);
+        }
+        let time = self.millis();
+        let connection = self
+            .connections
+            .get_mut(&key.session)
+            .ok_or(EngineError::UnknownSession(key.session))?;
+        let encoded = connection
+            .compositor_mut()
+            .commit_text(key.window, text)
+            .map_err(|error| EngineError::TextInput(error.to_string()))?;
+        if encoded == 0 {
+            let keys = ascii_to_evdev(text).ok_or_else(|| {
+                EngineError::TextInput(
+                    "the focused application does not support text-input-v3 for non-ASCII input"
+                        .to_string(),
+                )
+            })?;
+            for (code, shifted) in keys {
+                let compositor = connection.compositor_mut();
+                if shifted {
+                    compositor.key(42, true, time)?;
+                }
+                compositor.key(code, true, time)?;
+                compositor.key(code, false, time)?;
+                if shifted {
+                    compositor.key(42, false, time)?;
+                }
+            }
+        }
+        self.flush(key.session)
+    }
+
+    pub fn set_preedit_text(
+        &mut self,
+        key: SurfaceKey,
+        text: Option<&str>,
+        cursor_begin: i32,
+        cursor_end: i32,
+    ) -> Result<EngineOutput, EngineError> {
+        self.connections
+            .get_mut(&key.session)
+            .ok_or(EngineError::UnknownSession(key.session))?
+            .compositor_mut()
+            .set_preedit_text(key.window, text, cursor_begin, cursor_end)
+            .map_err(|error| EngineError::TextInput(error.to_string()))?;
+        self.flush(key.session)
+    }
+
+    pub fn delete_surrounding_text(
+        &mut self,
+        key: SurfaceKey,
+        before_length: u32,
+        after_length: u32,
+    ) -> Result<EngineOutput, EngineError> {
+        if before_length > 4000 || after_length > 4000 {
+            return Err(EngineError::TextInput(
+                "surrounding-text deletion exceeds 4000 bytes".to_string(),
+            ));
+        }
+        let time = self.millis();
+        let connection = self
+            .connections
+            .get_mut(&key.session)
+            .ok_or(EngineError::UnknownSession(key.session))?;
+        let encoded = connection.compositor_mut().delete_surrounding_text(
+            key.window,
+            before_length,
+            after_length,
+        );
+        if encoded == 0 {
+            for code in std::iter::repeat_n(14, before_length as usize)
+                .chain(std::iter::repeat_n(111, after_length as usize))
+            {
+                let compositor = connection.compositor_mut();
+                compositor.key(code, true, time)?;
+                compositor.key(code, false, time)?;
+            }
+        }
+        self.flush(key.session)
+    }
+
     pub fn resize(&mut self, key: SurfaceKey, size: Size) -> Result<EngineOutput, EngineError> {
         self.connections
             .get_mut(&key.session)
@@ -687,6 +778,7 @@ impl AndroidEngine {
                         .events
                         .push(EngineEvent::ClipboardText { session, text });
                 }
+                CoreEvent::TextInputState { .. } => {}
                 CoreEvent::Closed => {}
             }
         }

@@ -34,6 +34,9 @@ pub enum ActorCommand {
     DisconnectSession(SessionId),
     Resize(SurfaceKey, Size),
     SetClipboard(String),
+    CommitText(SurfaceKey, String),
+    SetPreedit(SurfaceKey, Option<String>, i32, i32),
+    DeleteSurrounding(SurfaceKey, u32, u32),
     Stop,
 }
 
@@ -181,6 +184,13 @@ async fn run_actor(
                     ActorCommand::CloseWindow(key) => (key.session, lock(&engine).close_window(key)),
                     ActorCommand::Resize(key, size) => (key.session, lock(&engine).resize(key, size)),
                     ActorCommand::SetClipboard(text) => (0, lock(&engine).set_clipboard_text(&text)),
+                    ActorCommand::CommitText(key, text) => (key.session, lock(&engine).commit_text(key, &text)),
+                    ActorCommand::SetPreedit(key, text, begin, end) => {
+                        (key.session, lock(&engine).set_preedit_text(key, text.as_deref(), begin, end))
+                    }
+                    ActorCommand::DeleteSurrounding(key, before, after) => {
+                        (key.session, lock(&engine).delete_surrounding_text(key, before, after))
+                    }
                     ActorCommand::DisconnectSession(id) => {
                         let result = lock(&engine).disconnect(id, true);
                         dispatch_result(&engine, result, id, &routes, &events).await;
@@ -239,6 +249,9 @@ async fn dispatch_result(
                 send_routed(routes, id, data).await;
             }
             emit_output(events, batch_events);
+        }
+        Err(EngineError::TextInput(message)) => {
+            let _ = events.send(EngineEvent::Status { message });
         }
         Err(error) => {
             let _ = events.send(EngineEvent::Error {

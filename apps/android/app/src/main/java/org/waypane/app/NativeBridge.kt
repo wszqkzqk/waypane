@@ -41,6 +41,9 @@ object NativeBridge {
     external fun nativePointer(handle: Long, session: Long, window: Int, x: Float, y: Float, button: Int, pressed: Boolean): Boolean
     external fun nativeScroll(handle: Long, session: Long, window: Int, x: Float, y: Float, horizontal: Float, vertical: Float): Boolean
     external fun nativeKey(handle: Long, session: Long, window: Int, androidKeycode: Int, pressed: Boolean): Boolean
+    external fun nativeCommitText(handle: Long, session: Long, window: Int, text: String): Boolean
+    external fun nativeSetPreeditText(handle: Long, session: Long, window: Int, text: String, cursorBegin: Int, cursorEnd: Int): Boolean
+    external fun nativeDeleteSurroundingText(handle: Long, session: Long, window: Int, beforeLength: Int, afterLength: Int): Boolean
     external fun nativeSetClipboardText(handle: Long, text: String): Boolean
     external fun nativeCloseWindow(handle: Long, session: Long, window: Int): Boolean
     external fun nativeResizeWindow(handle: Long, session: Long, window: Int, width: Int, height: Int): Boolean

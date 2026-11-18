@@ -4,7 +4,6 @@ import android.content.Context
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Process
-import android.util.Log
 import android.view.Choreographer
 import android.view.InputDevice
 import android.view.KeyEvent
@@ -281,40 +280,53 @@ class RemoteSurfaceView(
         }
 
         override fun commitText(text: CharSequence, newCursorPosition: Int): Boolean {
-            if (handle() == 0L) return false
-            var offset = 0
-            while (offset < text.length) {
-                val codePoint = Character.codePointAt(text, offset)
-                offset += Character.charCount(codePoint)
-                if (codePoint > 0x7f) {
-                    val value = String(Character.toChars(codePoint))
-                    Log.w(TAG, "Non-ASCII IME text requires text-input-v3: $value")
-                    onUnsupportedText(value)
-                    continue
-                }
-                when (codePoint) {
-                    '\n'.code -> sendKey(KeyEvent.KEYCODE_ENTER)
-                    '\t'.code -> sendKey(KeyEvent.KEYCODE_TAB)
-                    8 -> sendKey(KeyEvent.KEYCODE_DEL)
-                    else -> {
-                        val down = KeyEvent(KeyEvent.ACTION_DOWN, codePoint)
-                        val up = KeyEvent(KeyEvent.ACTION_UP, codePoint)
-                        val shifted = down.isShiftPressed
-                        if (shifted) NativeBridge.nativeKey(handle(), key.session, key.window, KeyEvent.KEYCODE_SHIFT_LEFT, true)
-                        sendKeyEvent(down)
-                        sendKeyEvent(up)
-                        if (shifted) NativeBridge.nativeKey(handle(), key.session, key.window, KeyEvent.KEYCODE_SHIFT_LEFT, false)
-                    }
-                }
+            val handle = handle()
+            if (handle == 0L) return false
+            return runCatching {
+                NativeBridge.nativeCommitText(handle, key.session, key.window, text.toString()) &&
+                    super.commitText(text, newCursorPosition)
+            }.getOrElse { error ->
+                onUnsupportedText(error.message ?: text.toString())
+                false
             }
-            return super.commitText(text, newCursorPosition)
+        }
+
+        override fun setComposingText(text: CharSequence, newCursorPosition: Int): Boolean {
+            val handle = handle()
+            if (handle == 0L) return false
+            return runCatching {
+                NativeBridge.nativeSetPreeditText(
+                    handle,
+                    key.session,
+                    key.window,
+                    text.toString(),
+                    0,
+                    text.length,
+                ) && super.setComposingText(text, newCursorPosition)
+            }.getOrElse { error ->
+                onUnsupportedText(error.message ?: text.toString())
+                false
+            }
+        }
+
+        override fun finishComposingText(): Boolean {
+            val handle = handle()
+            if (handle != 0L) {
+                NativeBridge.nativeSetPreeditText(handle, key.session, key.window, "", -1, -1)
+            }
+            return super.finishComposingText()
         }
 
         override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
-            repeat((beforeLength + afterLength).coerceAtLeast(0)) {
-                sendKey(KeyEvent.KEYCODE_DEL)
-            }
-            return super.deleteSurroundingText(beforeLength, afterLength)
+            val handle = handle()
+            if (handle == 0L) return false
+            return NativeBridge.nativeDeleteSurroundingText(
+                handle,
+                key.session,
+                key.window,
+                beforeLength,
+                afterLength,
+            ) && super.deleteSurroundingText(beforeLength, afterLength)
         }
 
         override fun performEditorAction(actionCode: Int): Boolean {
@@ -329,7 +341,6 @@ class RemoteSurfaceView(
     }
 
     companion object {
-        private const val TAG = "RemoteSurfaceView"
         private const val TOUCH_DOWN = 0
         private const val TOUCH_MOTION = 1
         private const val TOUCH_UP = 2
