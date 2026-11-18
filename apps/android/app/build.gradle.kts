@@ -7,7 +7,7 @@ plugins {
 val rustJniLibs = layout.buildDirectory.dir("rustJniLibs")
 val rustCrateDir = rootDir.resolve("../../crates/waypane-android").normalize()
 
-val rustBuild by tasks.registering(Exec::class) {
+val rustBuild = tasks.register<Exec>("rustBuild") {
     group = "build"
     description = "Builds the Waypane Rust JNI library for arm64 Android."
     workingDir = rootDir.resolve("../../").normalize()
@@ -71,7 +71,7 @@ android {
     }
 
     sourceSets.getByName("main") {
-        jniLibs.srcDir(rustJniLibs)
+        jniLibs.directories.add(rustJniLibs.get().asFile)
     }
 }
 
