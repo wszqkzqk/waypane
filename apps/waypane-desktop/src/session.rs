@@ -35,8 +35,8 @@ enum SessionCommand {
 pub enum SessionTarget {
     Local(PathBuf),
     Ssh {
-        config: SshConfig,
-        remote: RemoteWaypipe,
+        config: Box<SshConfig>,
+        remote: Box<RemoteWaypipe>,
     },
 }
 
@@ -150,34 +150,36 @@ async fn run(
                 );
             }
         }
-        SessionTarget::Ssh { config, remote } => match SshSession::connect(config, &remote).await {
-            Ok(mut session) => {
-                if let Some(mut events) = session.take_events() {
-                    let proxy = proxy.clone();
-                    tokio::spawn(async move {
-                        while let Some(event) = events.recv().await {
-                            let message = match event {
-                                CommandEvent::Stdout(data) | CommandEvent::Stderr(data) => {
-                                    String::from_utf8_lossy(&data).into_owned()
-                                }
-                                CommandEvent::ExitStatus(status) => {
-                                    format!("remote command exited: {status:?}")
-                                }
-                            };
-                            send_proxy(&proxy, SessionEvent::Output(message));
-                        }
-                    });
+        SessionTarget::Ssh { config, remote } => {
+            match SshSession::connect(*config, &remote).await {
+                Ok(mut session) => {
+                    if let Some(mut events) = session.take_events() {
+                        let proxy = proxy.clone();
+                        tokio::spawn(async move {
+                            while let Some(event) = events.recv().await {
+                                let message = match event {
+                                    CommandEvent::Stdout(data) | CommandEvent::Stderr(data) => {
+                                        String::from_utf8_lossy(&data).into_owned()
+                                    }
+                                    CommandEvent::ExitStatus(status) => {
+                                        format!("remote command exited: {status:?}")
+                                    }
+                                };
+                                send_proxy(&proxy, SessionEvent::Output(message));
+                            }
+                        });
+                    }
+                    while let Some(stream) = session.accept().await {
+                        let id = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
+                        spawn_stream(id, stream, routes.clone(), proxy.clone());
+                    }
+                    if let Err(error) = session.shutdown().await {
+                        send_proxy(&proxy, error_event(None, error));
+                    }
                 }
-                while let Some(stream) = session.accept().await {
-                    let id = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
-                    spawn_stream(id, stream, routes.clone(), proxy.clone());
-                }
-                if let Err(error) = session.shutdown().await {
-                    send_proxy(&proxy, error_event(None, error));
-                }
+                Err(error) => send_proxy(&proxy, error_event(None, error)),
             }
-            Err(error) => send_proxy(&proxy, error_event(None, error)),
-        },
+        }
     }
 
     while !lock_routes(&routes).is_empty() {

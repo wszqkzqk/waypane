@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use app::App;
 use clap::{Parser, ValueEnum};
 use session::{SessionManager, SessionTarget};
-use waypane_transport::{Authentication, RemoteWaypipe, SshConfig};
+use waypane_transport::{Authentication, HostKeyPolicy, RemoteWaypipe, SshConfig};
 use waypipe_client::{ClientConfig, Compression};
 use winit::event_loop::EventLoop;
 
@@ -60,6 +60,9 @@ struct Args {
 
     #[arg(long, default_value = "waypipe")]
     waypipe_bin: String,
+
+    #[arg(long, value_name = "PATH")]
+    remote_socket: Option<String>,
 
     #[arg(long, value_enum, default_value_t)]
     compression: CompressionArg,
@@ -130,19 +133,29 @@ fn session_target(args: &Args) -> Result<SessionTarget, String> {
     } else {
         Authentication::Auto
     };
-    let remote = RemoteWaypipe::new(compression, args.command.clone())
+    let mut remote = RemoteWaypipe::new(compression, args.command.clone())
         .map_err(|error| error.to_string())?
         .with_binary(args.waypipe_bin.clone());
+    if let Some(path) = &args.remote_socket {
+        remote = remote
+            .with_remote_socket(path.clone())
+            .map_err(|error| error.to_string())?;
+    }
+    let host_key_policy = if args.accept_new_host_key {
+        HostKeyPolicy::AcceptNew
+    } else {
+        HostKeyPolicy::Check
+    };
     Ok(SessionTarget::Ssh {
-        config: SshConfig {
+        config: Box::new(SshConfig {
             host,
             port: args.port.unwrap_or(endpoint_port),
             user,
             authentication,
             known_hosts: args.known_hosts.clone(),
-            accept_unknown_host_key: args.accept_new_host_key,
-        },
-        remote,
+            host_key_policy,
+        }),
+        remote: Box::new(remote),
     })
 }
 
