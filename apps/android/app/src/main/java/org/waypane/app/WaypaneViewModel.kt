@@ -12,7 +12,6 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import java.io.File
@@ -189,7 +188,7 @@ class WaypaneViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private suspend fun consumeEvents(sessionHandle: Long) {
-        while (isActive && handle.get() == sessionHandle) {
+        while (handle.get() == sessionHandle) {
             val payload = try {
                 NativeBridge.nativeNextEvent(sessionHandle)
             } catch (error: RuntimeException) {
