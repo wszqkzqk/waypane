@@ -314,15 +314,30 @@ async fn connects_waypipe_through_sshd_with_tofu_and_termux_tmpdir() {
     );
 
     let mut events = session.take_events().unwrap();
-    let stream = tokio::time::timeout(Duration::from_secs(15), session.accept())
-        .await
-        .expect("timed out waiting for Waypipe streamlocal connection")
-        .expect("Waypipe streamlocal channel closed");
+    let mut remote_stdout = String::new();
+    let mut remote_stderr = String::new();
+    let stream = loop {
+        tokio::select! {
+            stream = session.accept() => break stream,
+            event = events.recv() => match event {
+                Some(CommandEvent::Stdout(data)) => remote_stdout.push_str(&String::from_utf8_lossy(&data)),
+                Some(CommandEvent::Stderr(data)) => remote_stderr.push_str(&String::from_utf8_lossy(&data)),
+                Some(CommandEvent::ExitStatus(status)) => panic!(
+                    "Waypipe exited with {status:?} before connecting; stdout: {remote_stdout}; stderr: {remote_stderr}; sshd log: {}",
+                    fs::read_to_string(server.root.join("sshd.log")).unwrap_or_default()
+                ),
+                None => panic!("remote command channel closed before Waypipe connected; stdout: {remote_stdout}; stderr: {remote_stderr}"),
+            },
+            _ = tokio::time::sleep(Duration::from_secs(15)) => panic!(
+                "timed out waiting for Waypipe streamlocal connection; stdout: {remote_stdout}; stderr: {remote_stderr}; sshd log: {}",
+                fs::read_to_string(server.root.join("sshd.log")).unwrap_or_default()
+            ),
+        }
+    }
+    .expect("Waypipe streamlocal channel closed");
     let result = tokio::time::timeout(Duration::from_secs(20), drive_wayland(stream))
         .await
         .expect("timed out driving Wayland over SSH");
-    let mut remote_stdout = String::new();
-    let mut remote_stderr = String::new();
     let mut exit_status = None;
     while let Ok(Some(event)) = tokio::time::timeout(Duration::from_secs(3), events.recv()).await {
         match event {
@@ -336,7 +351,11 @@ async fn connects_waypipe_through_sshd_with_tofu_and_termux_tmpdir() {
     }
     let _ = session.shutdown().await;
     server.stop().await;
-    result.unwrap();
+    if let Err(error) = result {
+        panic!(
+            "Wayland over SSH failed: {error}; stdout: {remote_stdout}; stderr: {remote_stderr}"
+        );
+    }
     assert_eq!(exit_status, Some(0), "stderr: {remote_stderr}");
     assert!(
         remote_stdout.contains("completed"),
