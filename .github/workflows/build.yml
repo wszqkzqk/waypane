@@ -90,6 +90,7 @@ jobs:
             libclang-dev \
             liblz4-dev \
             libzstd-dev \
+            openssh-server \
             pkg-config
       - name: Build upstream Waypipe without GPU or video
         env:
@@ -124,6 +125,14 @@ jobs:
             --test upstream_text_input \
             --test upstream_toplevel \
             -- --ignored --nocapture
+      - name: Test real SSH, TOFU, encrypted keys, and Termux TMPDIR
+        env:
+          WAYPIPE_TEST_BINARY: ${{ github.workspace }}/target/upstream-waypipe/release/waypipe
+          WAYPIPE_SSHD: /usr/sbin/sshd
+        run: |
+          sudo mkdir -p /run/sshd
+          sudo chmod 0755 /run/sshd
+          cargo test -p waypane-core --locked --test upstream_ssh -- --ignored --nocapture
 
   android:
     name: Android APK

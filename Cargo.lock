@@ -3578,8 +3578,10 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "thiserror 2.0.21",
+ "tokio",
  "wayland-backend",
  "wayland-scanner",
+ "waypane-transport",
  "waypipe-client",
 ]
 

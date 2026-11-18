@@ -13,3 +13,7 @@ waypipe-client = { path = "../waypipe-client" }
 
 [target.'cfg(unix)'.dependencies]
 wayland-backend = { version = "0.3.17", default-features = false }
+
+[dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["io-util", "macros", "net", "process", "rt", "time"] }
+waypane-transport = { path = "../waypane-transport" }
