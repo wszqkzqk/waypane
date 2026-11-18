@@ -84,7 +84,16 @@ impl RemoteWaypipe {
             Compression::Lz4 => "lz4",
             Compression::Zstd => "zstd",
         };
+        let runtime_dir = socket_path.rsplit_once('/').map_or("/", |(directory, _)| {
+            if directory.is_empty() {
+                "/"
+            } else {
+                directory
+            }
+        });
         let mut parts = vec![
+            "env".to_string(),
+            format!("XDG_RUNTIME_DIR={}", shell_quote(runtime_dir)),
             shell_quote(&self.binary),
             "--no-gpu".to_string(),
             "--compress".to_string(),
@@ -142,7 +151,7 @@ mod tests {
         remote.binary = "waypipe".into();
         assert_eq!(
             remote.command_line("/tmp/waypane.sock"),
-            "waypipe --no-gpu --compress lz4 --socket /tmp/waypane.sock server -- env GTK_THEME=Adwaita:dark 'my app;$(false)'"
+            "env XDG_RUNTIME_DIR=/tmp waypipe --no-gpu --compress lz4 --socket /tmp/waypane.sock server -- env GTK_THEME=Adwaita:dark 'my app;$(false)'"
         );
     }
 
@@ -155,6 +164,10 @@ mod tests {
         assert!(path.starts_with("/data/data/com.termux/files/usr/tmp/wp-"));
         assert!(path.ends_with(".sock"));
         assert!(path.len() <= MAX_REMOTE_SOCKET_BYTES);
+        assert_eq!(
+            remote.command_line(&path),
+            format!("env XDG_RUNTIME_DIR=/data/data/com.termux/files/usr/tmp waypipe --no-gpu --compress zstd --socket {path} server -- foot")
+        );
     }
 
     #[test]

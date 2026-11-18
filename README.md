@@ -71,8 +71,9 @@ and static content does not run a 60 Hz polling loop.
   changed keys; Android displays the SHA-256 fingerprint before saving a new key and requires
   explicit confirmation before replacing a changed key
 - Automatic writable remote directory discovery (`TMPDIR`, then `XDG_RUNTIME_DIR`, then `/tmp`)
-  for Termux and Linux, with unique length-bounded sockets and explicit `--remote-socket` or
-  Android remote-socket overrides; application commands remain separate from Waypipe options
+  for Termux and Linux, with `XDG_RUNTIME_DIR` set to that directory for headless/non-login SSH
+  sessions, unique length-bounded sockets, and explicit `--remote-socket` or Android
+  remote-socket overrides; application commands remain separate from Waypipe options
 - Android atomic SAF private-key import with a 64 KiB limit, owner-only app-private storage,
   backup exclusion for keys and `known_hosts`, and a true delete-imported-key action
 
