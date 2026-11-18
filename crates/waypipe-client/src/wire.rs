@@ -308,7 +308,9 @@ pub fn decode_rids(payload: &[u8]) -> Result<Vec<Rid>, Error> {
         )));
     }
     Ok(payload
-        .chunks_exact(4)
-        .map(|bytes| Rid(i32::from_le_bytes(bytes.try_into().unwrap())))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| Rid(i32::from_le_bytes(*bytes)))
         .collect())
 }

@@ -23,11 +23,11 @@ jni-check = [
 bytes = "1"
 jni = { version = "0.22", optional = true }
 log = "0.4"
-pollster = { version = "0.4", optional = true }
+pollster = { version = "1", optional = true }
 raw-window-handle = { version = "0.6", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", optional = true }
-shlex = { version = "1", optional = true }
+shlex = { version = "2", optional = true }
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "rt", "sync", "time"] }
 waypane-core = { path = "../waypane-core" }

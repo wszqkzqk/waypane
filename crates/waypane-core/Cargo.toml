@@ -12,4 +12,4 @@ wayland-scanner = "0.31.11"
 waypipe-client = { path = "../waypipe-client" }
 
 [target.'cfg(unix)'.dependencies]
-wayland-backend = { version = "0.3.12", default-features = false }
+wayland-backend = { version = "0.3.17", default-features = false }
