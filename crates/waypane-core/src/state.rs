@@ -1,4 +1,4 @@
-use wayland_backend::protocol::Interface;
+use crate::wayland_backend::protocol::Interface;
 use waypipe_client::Rid;
 
 use crate::protocol::interface_by_name;

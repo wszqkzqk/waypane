@@ -1,10 +1,11 @@
+use crate::wayland_backend::protocol::{AllowNull, ArgumentType, Interface, MessageDesc};
 use bytes::{BufMut, Bytes, BytesMut};
-use wayland_backend::protocol::{AllowNull, ArgumentType, Interface, MessageDesc};
 use waypipe_client::{ProtocolMessage, Rid, WaylandMessage};
 
 use crate::error::{Error, Result};
 
 pub mod wayland {
+    use crate::wayland_backend;
     wayland_scanner::generate_interfaces!("protocols/wayland.xml");
 }
 
@@ -13,6 +14,7 @@ pub mod xdg {
         wl_output_interface, wl_seat_interface, wl_surface_interface, WL_OUTPUT_INTERFACE,
         WL_SEAT_INTERFACE, WL_SURFACE_INTERFACE,
     };
+    use crate::wayland_backend;
     wayland_scanner::generate_interfaces!("protocols/xdg-shell.xml");
 }
 
@@ -20,6 +22,7 @@ pub mod text_input {
     use super::wayland::{
         wl_seat_interface, wl_surface_interface, WL_SEAT_INTERFACE, WL_SURFACE_INTERFACE,
     };
+    use crate::wayland_backend;
     wayland_scanner::generate_interfaces!("protocols/text-input-unstable-v3.xml");
 }
 

@@ -8,6 +8,8 @@ rust-version.workspace = true
 [dependencies]
 bytes = "1"
 thiserror = "2"
-wayland-backend = { version = "0.3.12", default-features = false }
 wayland-scanner = "0.31.11"
 waypipe-client = { path = "../waypipe-client" }
+
+[target.'cfg(unix)'.dependencies]
+wayland-backend = { version = "0.3.12", default-features = false }

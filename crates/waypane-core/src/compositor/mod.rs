@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
-use wayland_backend::protocol::Interface;
+use crate::wayland_backend::protocol::Interface;
 use waypipe_client::{Client, ProtocolMessage, Rid};
 
 use crate::error::{Error, Result};

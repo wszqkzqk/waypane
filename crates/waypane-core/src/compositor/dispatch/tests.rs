@@ -18,7 +18,10 @@ fn record(interface: &'static Interface) -> ObjectRecord {
     ObjectRecord::new(interface, interface.version)
 }
 
-fn method<'a>(interface: &'a Interface, name: &str) -> &'a wayland_backend::protocol::MessageDesc {
+fn method<'a>(
+    interface: &'a Interface,
+    name: &str,
+) -> &'a crate::wayland_backend::protocol::MessageDesc {
     interface
         .requests
         .iter()

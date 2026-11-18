@@ -30,8 +30,8 @@ pub enum Error {
 impl Error {
     pub(crate) fn malformed(
         (interface, method): (
-            &'static wayland_backend::protocol::Interface,
-            &'static wayland_backend::protocol::MessageDesc,
+            &'static crate::wayland_backend::protocol::Interface,
+            &'static crate::wayland_backend::protocol::MessageDesc,
         ),
         reason: impl Into<String>,
     ) -> Self {
