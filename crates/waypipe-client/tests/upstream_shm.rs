@@ -29,7 +29,7 @@ impl TempRuntime {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("waypane-e2e-{}-{nonce}", std::process::id()));
+        let root = PathBuf::from("/tmp").join(format!("wp-{:x}-{nonce:x}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         let channel = root.join("transport.sock");
         Self { root, channel }

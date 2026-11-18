@@ -530,6 +530,12 @@ impl ResourceStore {
             .map(|file| std::mem::take(&mut file.damage))
     }
 
+    pub fn clear_damage(&mut self) {
+        for file in self.remote_files.values_mut() {
+            file.damage.clear();
+        }
+    }
+
     pub fn contains(&self, rid: Rid) -> bool {
         self.remote_files.contains_key(&rid)
             || self.local_files.contains_key(&rid)

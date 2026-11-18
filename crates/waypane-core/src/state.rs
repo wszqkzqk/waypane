@@ -1,0 +1,200 @@
+use wayland_backend::protocol::Interface;
+use waypipe_client::Rid;
+
+use crate::protocol::interface_by_name;
+use crate::types::{Point, Rect, ShmFormat, WindowId, WindowKind};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObjectKind {
+    Display,
+    Registry,
+    Callback,
+    Compositor,
+    Subcompositor,
+    Shm,
+    ShmPool,
+    Buffer,
+    Surface,
+    Subsurface,
+    Region,
+    XdgWmBase,
+    XdgSurface,
+    XdgToplevel,
+    XdgPopup,
+    XdgPositioner,
+    Seat,
+    Keyboard,
+    Pointer,
+    Touch,
+    Output,
+    Other,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ObjectRecord {
+    pub interface: &'static Interface,
+    pub version: u32,
+    pub kind: ObjectKind,
+}
+
+impl ObjectRecord {
+    pub fn new(interface: &'static Interface, version: u32) -> Self {
+        Self {
+            interface,
+            version,
+            kind: kind_for_name(interface.name),
+        }
+    }
+}
+
+pub(crate) fn kind_for_name(name: &str) -> ObjectKind {
+    match name {
+        "wl_display" => ObjectKind::Display,
+        "wl_registry" => ObjectKind::Registry,
+        "wl_callback" => ObjectKind::Callback,
+        "wl_compositor" => ObjectKind::Compositor,
+        "wl_subcompositor" => ObjectKind::Subcompositor,
+        "wl_shm" => ObjectKind::Shm,
+        "wl_shm_pool" => ObjectKind::ShmPool,
+        "wl_buffer" => ObjectKind::Buffer,
+        "wl_surface" => ObjectKind::Surface,
+        "wl_subsurface" => ObjectKind::Subsurface,
+        "wl_region" => ObjectKind::Region,
+        "xdg_wm_base" => ObjectKind::XdgWmBase,
+        "xdg_surface" => ObjectKind::XdgSurface,
+        "xdg_toplevel" => ObjectKind::XdgToplevel,
+        "xdg_popup" => ObjectKind::XdgPopup,
+        "xdg_positioner" => ObjectKind::XdgPositioner,
+        "wl_seat" => ObjectKind::Seat,
+        "wl_keyboard" => ObjectKind::Keyboard,
+        "wl_pointer" => ObjectKind::Pointer,
+        "wl_touch" => ObjectKind::Touch,
+        "wl_output" => ObjectKind::Output,
+        _ => ObjectKind::Other,
+    }
+}
+
+pub(crate) fn global_interface(name: &str, version: u32) -> Option<ObjectRecord> {
+    interface_by_name(name).map(|interface| ObjectRecord::new(interface, version))
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SurfaceCommit {
+    pub buffer: Option<u32>,
+    pub offset: Point,
+    pub scale: i32,
+    pub transform: u32,
+}
+
+impl Default for SurfaceCommit {
+    fn default() -> Self {
+        Self {
+            buffer: None,
+            offset: Point::default(),
+            scale: 1,
+            transform: 0,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct PendingSurface {
+    pub attach: Option<Option<u32>>,
+    pub offset: Option<Point>,
+    pub scale: Option<i32>,
+    pub transform: Option<u32>,
+    pub damage: Vec<(Rect, bool)>,
+    pub callbacks: Vec<u32>,
+    pub position: Option<Point>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Role {
+    #[default]
+    None,
+    Toplevel(WindowId),
+    Popup(WindowId),
+    Subsurface {
+        parent: u32,
+        proxy: u32,
+    },
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct Surface {
+    pub committed: SurfaceCommit,
+    pub pending: PendingSurface,
+    pub role: Role,
+    pub window_id: Option<WindowId>,
+    pub position: Point,
+}
+
+#[derive(Debug)]
+pub(crate) struct Pool {
+    pub rid: Rid,
+    pub size: usize,
+    pub buffer_refs: usize,
+    pub destroyed: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct Buffer {
+    pub pool_id: u32,
+    pub rid: Rid,
+    pub offset: i32,
+    pub width: i32,
+    pub height: i32,
+    pub stride: i32,
+    pub format: ShmFormat,
+    pub alive: bool,
+}
+
+impl Buffer {
+    pub fn required_bytes(&self) -> Option<usize> {
+        if self.width <= 0 || self.height <= 0 || self.stride < self.width.saturating_mul(4) {
+            return None;
+        }
+        let last_row = usize::try_from(self.height - 1).ok()?;
+        let stride = usize::try_from(self.stride).ok()?;
+        let row_bytes = usize::try_from(self.width).ok()?.checked_mul(4)?;
+        let offset = usize::try_from(self.offset).ok()?;
+        last_row
+            .checked_mul(stride)?
+            .checked_add(row_bytes)?
+            .checked_add(offset)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct XdgSurface {
+    pub surface_id: u32,
+    pub window_id: Option<WindowId>,
+    pub geometry: Option<Rect>,
+    pub configure_serial: Option<u32>,
+    pub initial_ack_seen: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct Window {
+    pub id: WindowId,
+    pub xdg_surface_id: u32,
+    pub surface_id: u32,
+    pub kind: WindowKind,
+    pub title: String,
+    pub app_id: String,
+    pub geometry: Rect,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Positioner {
+    pub size: Option<(i32, i32)>,
+    pub anchor_rect: Option<Rect>,
+    pub offset: Point,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct Seat {
+    pub keyboards: Vec<u32>,
+    pub pointers: Vec<u32>,
+    pub touches: Vec<u32>,
+}
