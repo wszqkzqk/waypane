@@ -165,13 +165,16 @@ window is not counted as presented.
   automated run of the current code reached frame upload and `RedrawRequested`, but AppKit
   reported the 64x64 CLI-created window as `Occluded`, so that run did not claim a new on-screen
   presentation.
-- The Android Rust/JNI code passed `cargo ndk` checking with NDK r27d for
-  `aarch64-linux-android` at API 26 during development. That native check predates the
-  subsequent AGP 9/Kotlin 2.4/API 37 migration. The full APK is built only in CI and that
-  workflow has not run remotely yet; no physical Android device has been tested.
-- `waypane-desktop` passed local `cargo check` and Clippy with `-D warnings` for
-  `x86_64-pc-windows-msvc`. Native Windows check, test, and release-build jobs are in CI and
-  have not run remotely yet; interactive behavior has not been verified on Windows.
+- GitHub Actions run `44345713034` passed formatting/Clippy, all upstream Waypipe integration
+  tests, native Windows and macOS checks/tests/release builds, and a complete Android APK
+  build with JDK 25, Gradle 9.9.1, AGP 9.5.1, Kotlin 2.4.21, SDK 37.2, and NDK
+  30.0.16248370. All three build artifacts were uploaded.
+- The CI-produced Android APK was inspected and contains
+  `lib/arm64-v8a/libwaypane_android.so`, built by the scheduled `rustBuild` task before JNI
+  merging and APK packaging.
+- Neither the Windows desktop binary nor the Android APK has been launched on a physical
+  device, so interactive GUI, input, clipboard, and lifecycle behavior on those platforms
+  remains runtime-unverified.
 
 ## Known limitations
 
