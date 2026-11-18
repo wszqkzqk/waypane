@@ -591,6 +591,10 @@ impl Compositor {
             (ObjectKind::DataDevice, "start_drag" | "release") => {}
             (ObjectKind::DataOffer, "receive") => self.receive_offer(client, request)?,
             (ObjectKind::DataOffer, "set_actions" | "finish" | "destroy") => {}
+            (ObjectKind::TextInputManager, "get_text_input") => {
+                self.create_text_input(request)?;
+            }
+            (ObjectKind::TextInput, _) => self.handle_text_input_request(request)?,
             (_, "destroy" | "release") => {}
             _ => {
                 return Err(Error::protocol(format!(
@@ -1243,6 +1247,7 @@ impl Compositor {
             ObjectKind::DataDevice | ObjectKind::DataSource | ObjectKind::DataOffer => {
                 self.finish_clipboard_destructor(client, id, kind);
             }
+            ObjectKind::TextInput => self.finish_text_input_destructor(id),
             _ => {}
         }
         self.objects.remove(&id);

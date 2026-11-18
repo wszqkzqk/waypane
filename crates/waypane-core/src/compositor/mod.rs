@@ -12,6 +12,7 @@ use crate::protocol::{
 };
 mod clipboard;
 mod dispatch;
+mod text_input;
 use crate::state::*;
 use crate::types::*;
 
@@ -89,6 +90,7 @@ pub struct Compositor {
     keyboard_focus: Option<WindowId>,
     pointer_focus: Option<(WindowId, SurfaceId, f64, f64)>,
     touches: BTreeMap<i32, (SurfaceId, f64, f64)>,
+    text_inputs: BTreeMap<u32, TextInput>,
     modifiers: Modifiers,
 }
 
@@ -128,6 +130,7 @@ impl Compositor {
             keyboard_focus: None,
             pointer_focus: None,
             touches: BTreeMap::new(),
+            text_inputs: BTreeMap::new(),
             modifiers: Modifiers::default(),
         }
     }
@@ -313,6 +316,7 @@ impl Compositor {
                 }
             }
         }
+        self.sync_text_input_focus(old_surface, new_surface)?;
         self.keyboard_focus = window_id;
         self.sync_data_device_focus()?;
         Ok(())

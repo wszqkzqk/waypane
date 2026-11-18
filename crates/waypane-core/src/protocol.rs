@@ -16,6 +16,13 @@ pub mod xdg {
     wayland_scanner::generate_interfaces!("protocols/xdg-shell.xml");
 }
 
+pub mod text_input {
+    use super::wayland::{
+        wl_seat_interface, wl_surface_interface, WL_SEAT_INTERFACE, WL_SURFACE_INTERFACE,
+    };
+    wayland_scanner::generate_interfaces!("protocols/text-input-unstable-v3.xml");
+}
+
 pub const GLOBALS: &[(&str, u32)] = &[
     ("wl_compositor", 6),
     ("wl_subcompositor", 1),
@@ -24,6 +31,7 @@ pub const GLOBALS: &[(&str, u32)] = &[
     ("wl_seat", 9),
     ("wl_output", 4),
     ("wl_data_device_manager", 3),
+    ("zwp_text_input_manager_v3", 1),
 ];
 
 pub fn event_opcode(interface: &Interface, name: &str) -> u16 {
@@ -71,6 +79,8 @@ pub fn interface_by_name(name: &str) -> Option<&'static Interface> {
         &xdg::XDG_SURFACE_INTERFACE,
         &xdg::XDG_TOPLEVEL_INTERFACE,
         &xdg::XDG_WM_BASE_INTERFACE,
+        &text_input::ZWP_TEXT_INPUT_V3_INTERFACE,
+        &text_input::ZWP_TEXT_INPUT_MANAGER_V3_INTERFACE,
     ]
     .into_iter()
     .find(|interface| interface.name == name)

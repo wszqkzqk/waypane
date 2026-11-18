@@ -113,6 +113,13 @@ pub enum CoreEvent {
         mime_type: String,
         data: Vec<u8>,
     },
+    TextInputState {
+        surface_id: SurfaceId,
+        enabled: bool,
+        content_hint: u32,
+        content_purpose: u32,
+        cursor_rect: Rect,
+    },
     Closed,
 }
 

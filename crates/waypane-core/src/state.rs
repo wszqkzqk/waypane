@@ -31,6 +31,8 @@ pub(crate) enum ObjectKind {
     DataDevice,
     DataSource,
     DataOffer,
+    TextInputManager,
+    TextInput,
     Other,
 }
 
@@ -78,6 +80,8 @@ pub(crate) fn kind_for_name(name: &str) -> ObjectKind {
         "wl_data_device" => ObjectKind::DataDevice,
         "wl_data_source" => ObjectKind::DataSource,
         "wl_data_offer" => ObjectKind::DataOffer,
+        "zwp_text_input_manager_v3" => ObjectKind::TextInputManager,
+        "zwp_text_input_v3" => ObjectKind::TextInput,
         _ => ObjectKind::Other,
     }
 }
@@ -143,6 +147,29 @@ pub(crate) struct SubsurfaceSync {
     pub surface: u32,
     pub synchronized: bool,
     pub cached: std::collections::VecDeque<PendingSurface>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub(crate) struct PendingTextInput {
+    pub enabled: Option<bool>,
+    pub content_hint: Option<u32>,
+    pub content_purpose: Option<u32>,
+    pub surrounding_text: Option<String>,
+    pub cursor_rect: Option<crate::types::Rect>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct TextInput {
+    pub seat_id: u32,
+    pub surface_id: Option<u32>,
+    pub focused: bool,
+    pub enabled: bool,
+    pub commit_count: u32,
+    pub pending: PendingTextInput,
+    pub content_hint: u32,
+    pub content_purpose: u32,
+    pub surrounding_text: Option<String>,
+    pub cursor_rect: crate::types::Rect,
 }
 
 #[derive(Debug)]
