@@ -2,6 +2,8 @@ mod gpu;
 
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use gpu::GpuRenderer;
@@ -9,16 +11,24 @@ use jni::objects::{JClass, JObject, JString};
 use jni::sys::{jboolean, jfloat, jint, jlong, jobject};
 use jni::{Env, EnvUnowned};
 use waypane_core::Size;
-use waypane_transport::{Authentication, RemoteWaypipe, SshConfig};
+use waypane_transport::{Authentication, HostKeyDecision, HostKeyPolicy, RemoteWaypipe, SshConfig};
 use waypipe_client::Compression;
 
 use crate::keycodes::android_keycode_to_evdev;
 use crate::{ActorCommand, ActorHandle, SessionId, SurfaceKey};
 
 struct NativeState {
-    gpu: GpuRenderer,
+    gpu: Mutex<GpuRenderer>,
     actor: ActorHandle,
 }
+
+struct NativeEntry {
+    handle: jlong,
+    state: Arc<NativeState>,
+}
+
+static STATE: Mutex<Option<NativeEntry>> = Mutex::new(None);
+static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
 struct JniError(String);
@@ -67,13 +77,19 @@ fn key(session: jlong, window: jint) -> Result<SurfaceKey, String> {
     Ok(SurfaceKey { session, window })
 }
 
-fn state<'a>(handle: jlong) -> Result<&'a mut NativeState, String> {
+fn state(handle: jlong) -> Result<Arc<NativeState>, String> {
     if handle == 0 {
         return Err("native handle is closed".to_string());
     }
-    // SAFETY: NativeBridge keeps the pointer opaque and frees it only in nativeDestroy;
-    // native* methods are called according to NativeBridge's main-thread/surface-thread contract.
-    Ok(unsafe { &mut *(handle as usize as *mut NativeState) })
+    lock(&STATE)
+        .as_ref()
+        .filter(|entry| entry.handle == handle)
+        .map(|entry| entry.state.clone())
+        .ok_or_else(|| "native handle is closed".to_string())
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn jb(value: bool) -> jboolean {
@@ -88,9 +104,10 @@ pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeConnect(
     port: jint,
     user: JString<'_>,
     identity: JString<'_>,
+    passphrase: JString<'_>,
     password: JString<'_>,
     known_hosts: JString<'_>,
-    accept_new_host_key: jboolean,
+    remote_socket: JString<'_>,
     compression: JString<'_>,
     command: JString<'_>,
 ) -> jlong {
@@ -112,34 +129,69 @@ pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeConnect(
             _ => return Err("unsupported compression".to_string()),
         };
         let identity = optional_text(env, &identity)?;
+        let passphrase = optional_text(env, &passphrase)?;
         let password = optional_text(env, &password)?;
-        let authentication = if let Some(password) = password {
-            Authentication::Password(password)
-        } else if let Some(path) = identity {
-            Authentication::PublicKey {
+        if passphrase.is_some() && identity.is_none() {
+            return Err("a private key passphrase requires an imported private key".to_string());
+        }
+        let known_hosts = optional_text(env, &known_hosts)?
+            .map(PathBuf::from)
+            .ok_or_else(|| "known_hosts path is required".to_string())?;
+        let authentication = match (identity, password) {
+            (Some(path), _) => Authentication::PublicKey {
                 path: PathBuf::from(path),
-                passphrase: None,
+                passphrase,
+            },
+            (None, Some(password)) => Authentication::Password(password),
+            (None, None) => {
+                return Err("import an SSH private key or enter a password".to_string());
             }
-        } else {
-            Authentication::Auto
         };
-        let known_hosts = optional_text(env, &known_hosts)?.map(PathBuf::from);
-        let remote = RemoteWaypipe::new(compression, command).map_err(|error| error.to_string())?;
-        let state = Box::new(NativeState {
-            gpu: GpuRenderer::default(),
+        let mut remote =
+            RemoteWaypipe::new(compression, command).map_err(|error| error.to_string())?;
+        if let Some(path) = optional_text(env, &remote_socket)? {
+            remote = remote
+                .with_remote_socket(path)
+                .map_err(|error| error.to_string())?;
+        }
+        let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed) as jlong;
+        if handle <= 0 {
+            return Err("native handle space exhausted".to_string());
+        }
+        let state = Arc::new(NativeState {
+            gpu: Mutex::new(GpuRenderer::default()),
             actor: ActorHandle::start(
                 SshConfig {
                     host,
                     port,
                     user,
                     authentication,
-                    known_hosts,
-                    accept_unknown_host_key: accept_new_host_key,
+                    known_hosts: Some(known_hosts),
+                    host_key_policy: HostKeyPolicy::Check,
                 },
                 remote,
             ),
         });
-        Ok(Box::into_raw(state) as usize as jlong)
+        let previous = lock(&STATE).replace(NativeEntry { handle, state });
+        drop(previous);
+        Ok(handle)
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeResolveHostKey(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    trusted: jboolean,
+) -> jboolean {
+    jni_guard!(env, env, jboolean, {
+        let decision = if trusted {
+            HostKeyDecision::TrustAndSave
+        } else {
+            HostKeyDecision::Reject
+        };
+        Ok(jb(state(handle)?.actor.resolve_host_key(decision)))
     })
 }
 
@@ -178,7 +230,7 @@ pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeAttachSurface(
         let state = state(handle)?;
         let width = u32::try_from(width).map_err(|_| "invalid width".to_string())?;
         let height = u32::try_from(height).map_err(|_| "invalid height".to_string())?;
-        state.gpu.attach(env, key, &surface, width, height)?;
+        lock(&state.gpu).attach(env, key, &surface, width, height)?;
         Ok(jb(true))
     })
 }
@@ -197,7 +249,8 @@ pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeResizeSurface(
         let key = key(session, window)?;
         let width = u32::try_from(width).map_err(|_| "invalid width".to_string())?;
         let height = u32::try_from(height).map_err(|_| "invalid height".to_string())?;
-        state(handle)?.gpu.resize(key, width, height);
+        let state = state(handle)?;
+        lock(&state.gpu).resize(key, width, height);
         Ok(())
     })
 }
@@ -213,7 +266,8 @@ pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeRender(
     jni_guard!(env, env, jboolean, {
         let key = key(session, window)?;
         let state = state(handle)?;
-        Ok(jb(state.gpu.render(&state.actor, key)))
+        let rendered = lock(&state.gpu).render(&state.actor, key);
+        Ok(jb(rendered))
     })
 }
 
@@ -226,7 +280,8 @@ pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeDetachSurface(
     window: jint,
 ) {
     jni_guard!(env, env, (), {
-        state(handle)?.gpu.detach(key(session, window)?);
+        let state = state(handle)?;
+        lock(&state.gpu).detach(key(session, window)?);
         Ok(())
     })
 }
@@ -547,11 +602,8 @@ pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeDestroy(
 ) {
     jni_guard!(env, env, (), {
         if handle != 0 {
-            // SAFETY: handle is atomically cleared by Kotlin before calling nativeDestroy once.
-            let state = unsafe { Box::from_raw(handle as usize as *mut NativeState) };
-            state.actor.stop();
-            drop(state.gpu);
-            drop(state.actor);
+            let previous = lock(&STATE).take_if(|entry| entry.handle == handle);
+            drop(previous);
         }
         Ok(())
     })

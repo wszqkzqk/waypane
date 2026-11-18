@@ -12,13 +12,15 @@ object NativeBridge {
         port: Int,
         user: String,
         identity: String,
+        passphrase: String,
         password: String,
         knownHosts: String,
-        acceptNewHostKey: Boolean,
+        remoteSocket: String,
         compression: String,
         command: String,
     ): Long
 
+    external fun nativeResolveHostKey(handle: Long, trusted: Boolean): Boolean
     external fun nativeNextEvent(handle: Long): String?
 
     external fun nativeAttachSurface(

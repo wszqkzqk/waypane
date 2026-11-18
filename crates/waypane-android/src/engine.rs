@@ -7,6 +7,7 @@ use bytes::{Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 use waypane_core::{Connection, CoreEvent, Frame, Point, Size, WindowId, WindowKind};
 use waypane_render::{Canvas, ImageError};
+use waypane_transport::HostKeyPrompt as TransportHostKeyPrompt;
 use waypipe_client::{ClientConfig, Compression};
 
 use crate::keycodes::ascii_to_evdev;
@@ -47,10 +48,29 @@ pub enum EngineEvent {
         session: SessionId,
         text: String,
     },
+    HostKeyPrompt {
+        host: String,
+        port: u16,
+        algorithm: String,
+        fingerprint: String,
+        changed: bool,
+    },
     Error {
         session: Option<SessionId>,
         message: String,
     },
+}
+
+impl From<TransportHostKeyPrompt> for EngineEvent {
+    fn from(prompt: TransportHostKeyPrompt) -> Self {
+        Self::HostKeyPrompt {
+            host: prompt.host,
+            port: prompt.port,
+            algorithm: prompt.algorithm,
+            fingerprint: prompt.fingerprint,
+            changed: prompt.changed,
+        }
+    }
 }
 
 #[derive(Debug, Default)]

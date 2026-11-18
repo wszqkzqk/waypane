@@ -11,13 +11,29 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
+import java.io.InputStream
 import java.util.concurrent.atomic.AtomicLong
+
+private const val MAX_PRIVATE_KEY_BYTES = 64 * 1024
+
+internal fun restrictToOwner(file: File) {
+    if (!file.setReadable(false, false) ||
+        !file.setReadable(true, true) ||
+        !file.setWritable(false, false) ||
+        !file.setWritable(true, true)
+    ) {
+        throw IOException("Failed to restrict permissions on ${file.name}")
+    }
+}
+
+internal fun importedKeyFile(application: Application): File = application.filesDir.resolve("id_ed25519")
 
 enum class Screen {
     Setup,
@@ -29,8 +45,9 @@ data class ConnectionProfile(
     val port: Int = 8022,
     val user: String = "",
     val identity: String = "",
+    val passphrase: String = "",
     val password: String = "",
-    val acceptNewHostKey: Boolean = false,
+    val remoteSocket: String = "",
     val compression: String = "lz4",
     val command: String = "foot",
 )
@@ -42,6 +59,7 @@ data class UiState(
     val selected: SurfaceKey? = null,
     val activeSessions: Set<Long> = emptySet(),
     val connecting: Boolean = false,
+    val hostKeyPrompt: EngineEvent.HostKeyPrompt? = null,
 )
 
 class WaypaneViewModel(application: Application) : AndroidViewModel(application) {
@@ -59,11 +77,10 @@ class WaypaneViewModel(application: Application) : AndroidViewModel(application)
         }
     }
     private val knownHostsPath = application.filesDir.resolve("known_hosts").apply {
-        if (!exists()) createNewFile()
-        setReadable(false, false)
-        setReadable(true, true)
-        setWritable(false, false)
-        setWritable(true, true)
+        if (!exists() && !createNewFile()) {
+            throw IOException("Failed to create known_hosts")
+        }
+        restrictToOwner(this)
     }
 
     var uiState by mutableStateOf(UiState())
@@ -93,6 +110,43 @@ class WaypaneViewModel(application: Application) : AndroidViewModel(application)
 
     fun nativeHandle(): Long = handle.get()
 
+    fun importedKeyPath(): String = importedKeyFile(getApplication()).takeIf(File::isFile)?.absolutePath.orEmpty()
+
+    fun importPrivateKey(input: InputStream): String {
+        val target = importedKeyFile(getApplication())
+        val temporary = target.resolveSibling("${target.name}.tmp")
+        try {
+            FileOutputStream(temporary).use { output ->
+                val buffer = ByteArray(8192)
+                var total = 0
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    total += count
+                    if (total > MAX_PRIVATE_KEY_BYTES) {
+                        throw IOException("Private key exceeds 64 KiB")
+                    }
+                    output.write(buffer, 0, count)
+                }
+                output.fd.sync()
+            }
+            restrictToOwner(temporary)
+            if (!temporary.renameTo(target)) {
+                throw IOException("Failed to move imported private key into app storage")
+            }
+            restrictToOwner(target)
+            return target.absolutePath
+        } catch (error: Exception) {
+            temporary.delete()
+            throw error
+        }
+    }
+
+    fun deleteImportedKey(): Boolean {
+        val target = importedKeyFile(getApplication())
+        return !target.exists() || target.delete()
+    }
+
     fun connect(profile: ConnectionProfile) {
         val freshHandle = try {
             NativeBridge.nativeConnect(
@@ -100,9 +154,10 @@ class WaypaneViewModel(application: Application) : AndroidViewModel(application)
                 port = profile.port,
                 user = profile.user.trim(),
                 identity = profile.identity,
+                passphrase = profile.passphrase,
                 password = profile.password,
                 knownHosts = knownHostsFile,
-                acceptNewHostKey = profile.acceptNewHostKey,
+                remoteSocket = profile.remoteSocket.trim(),
                 compression = profile.compression,
                 command = profile.command.trim(),
             )
@@ -126,37 +181,34 @@ class WaypaneViewModel(application: Application) : AndroidViewModel(application)
             error = null,
             selected = null,
             activeSessions = emptySet(),
-            connecting = false,
+            connecting = true,
+            hostKeyPrompt = null,
         )
         appendLog("Connecting to ${profile.host}:${profile.port}")
-        viewModelScope.launch(Dispatchers.IO) { consumeEvents(freshHandle) }
+        viewModelScope.launch { consumeEvents(freshHandle) }
     }
 
     private suspend fun consumeEvents(sessionHandle: Long) {
-        while (handle.get() == sessionHandle) {
+        while (isActive && handle.get() == sessionHandle) {
             val payload = try {
                 NativeBridge.nativeNextEvent(sessionHandle)
             } catch (error: RuntimeException) {
-                withContext(Dispatchers.Main) {
-                    if (handle.get() == sessionHandle) {
-                        notifyError("Event channel failed: ${error.message}")
-                    }
+                if (handle.get() == sessionHandle) {
+                    notifyError("Event channel failed: ${error.message}")
                 }
                 break
             }
             if (payload == null) {
-                delay(50)
+                delay(25)
                 continue
             }
             val event = try {
                 json.decodeFromString(EngineEvent.serializer(), payload)
-            } catch (error: Exception) {
-                withContext(Dispatchers.Main) { appendLog("Ignored malformed native event") }
+            } catch (_: Exception) {
+                appendLog("Ignored malformed native event")
                 continue
             }
-            withContext(Dispatchers.Main) {
-                if (handle.get() == sessionHandle) applyEvent(event)
-            }
+            if (handle.get() == sessionHandle) applyEvent(event)
         }
     }
 
@@ -166,6 +218,7 @@ class WaypaneViewModel(application: Application) : AndroidViewModel(application)
                 uiState = uiState.copy(
                     status = "Connected to SSH; waiting for Wayland surfaces",
                     activeSessions = uiState.activeSessions + event.session,
+                    connecting = false,
                 )
             }
             is EngineEvent.WindowUpsert -> {
@@ -203,8 +256,49 @@ class WaypaneViewModel(application: Application) : AndroidViewModel(application)
                     clipboardManager?.setPrimaryClip(ClipData.newPlainText("Waypane", event.text))
                 }
             }
-            is EngineEvent.Error -> notifyError(event.message)
+            is EngineEvent.HostKeyPrompt -> {
+                uiState = uiState.copy(
+                    hostKeyPrompt = event,
+                    status = if (event.changed) {
+                        "SSH host key changed for ${event.host}:${event.port}"
+                    } else {
+                        "Verify SSH host key for ${event.host}:${event.port}"
+                    },
+                )
+            }
+            is EngineEvent.Error -> {
+                uiState = uiState.copy(hostKeyPrompt = null)
+                notifyError(event.message)
+            }
         }
+    }
+
+    fun trustHostKey() {
+        val active = handle.get()
+        if (active == 0L) return
+        uiState = uiState.copy(
+            hostKeyPrompt = null,
+            status = uiState.hostKeyPrompt?.let { prompt ->
+                if (prompt.changed) {
+                    "Replacing saved SSH host key for ${prompt.host}:${prompt.port}…"
+                } else {
+                    "Saving SSH host key for ${prompt.host}:${prompt.port}…"
+                }
+            } ?: uiState.status,
+        )
+        if (!NativeBridge.nativeResolveHostKey(active, true)) {
+            reportError("No SSH host key decision is pending")
+        }
+    }
+
+    fun rejectHostKey() {
+        val prompt = uiState.hostKeyPrompt
+        val active = handle.get()
+        if (active != 0L) {
+            NativeBridge.nativeResolveHostKey(active, false)
+        }
+        returnToSetup()
+        reportError("SSH host key rejected for ${prompt?.host ?: "host"}${prompt?.let { ":${it.port}" }.orEmpty()}")
     }
 
     fun selectWindow(key: SurfaceKey) {
@@ -238,16 +332,9 @@ class WaypaneViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun returnToSetup() {
-        uiState = uiState.copy(
-            screen = Screen.Setup,
-            status = "",
-            error = null,
-            selected = null,
-            activeSessions = emptySet(),
-            connecting = false,
-        )
         windows.clear()
         disconnectNative()
+        uiState = UiState()
     }
 
     private fun notifyError(message: String?) {

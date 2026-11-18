@@ -6,7 +6,10 @@ use std::time::Duration;
 use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
-use waypane_transport::{pump, CommandEvent, RemoteWaypipe, SshConfig, SshSession};
+use waypane_transport::{
+    pump, CommandEvent, HostKeyChannel, HostKeyDecision, HostKeyPolicy, HostKeyPrompt,
+    RemoteWaypipe, SshConfig, SshSession,
+};
 
 use crate::engine::{
     AndroidEngine, AndroidSurface, EngineError, EngineEvent, EngineOutput, SurfaceKey,
@@ -40,23 +43,28 @@ pub enum ActorCommand {
     Stop,
 }
 
-#[derive(Clone)]
 pub struct ActorHandle {
     engine: Arc<Mutex<AndroidEngine>>,
     commands: mpsc::Sender<ActorCommand>,
     events: Arc<Mutex<mpsc::UnboundedReceiver<EngineEvent>>>,
+    host_keys: HostKeyChannel,
+    host_key_prompts: Arc<Mutex<mpsc::UnboundedReceiver<HostKeyPrompt>>>,
 }
 
 impl ActorHandle {
-    pub fn start(config: SshConfig, remote: RemoteWaypipe) -> Self {
+    pub fn start(mut config: SshConfig, remote: RemoteWaypipe) -> Self {
         let compression = remote.compression;
         let engine = Arc::new(Mutex::new(AndroidEngine::new(compression)));
         let (commands, command_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (host_keys, host_key_prompts) = HostKeyChannel::new();
+        config.host_key_policy = HostKeyPolicy::Interactive(host_keys.clone());
         let handle = Self {
             engine: engine.clone(),
             commands,
             events: Arc::new(Mutex::new(event_rx)),
+            host_keys,
+            host_key_prompts: Arc::new(Mutex::new(host_key_prompts)),
         };
         let actor_commands = handle.commands.clone();
         thread::spawn(move || {
@@ -81,15 +89,32 @@ impl ActorHandle {
     }
 
     pub fn next_event(&self) -> Option<EngineEvent> {
-        lock(&self.events).try_recv().ok()
+        if let Ok(event) = lock(&self.events).try_recv() {
+            return Some(event);
+        }
+        lock(&self.host_key_prompts)
+            .try_recv()
+            .ok()
+            .map(EngineEvent::from)
     }
 
     pub fn send(&self, command: ActorCommand) -> bool {
         self.commands.try_send(command).is_ok()
     }
 
+    pub fn resolve_host_key(&self, decision: HostKeyDecision) -> bool {
+        self.host_keys.decide(decision)
+    }
+
     pub fn stop(&self) {
+        self.host_keys.cancel();
         let _ = self.commands.try_send(ActorCommand::Stop);
+    }
+}
+
+impl Drop for ActorHandle {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 

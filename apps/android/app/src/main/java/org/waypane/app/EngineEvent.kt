@@ -65,6 +65,16 @@ sealed interface EngineEvent {
     data class ClipboardText(val session: Long, val text: String) : EngineEvent
 
     @Serializable
+    @SerialName("host_key_prompt")
+    data class HostKeyPrompt(
+        val host: String,
+        val port: Int,
+        val algorithm: String,
+        val fingerprint: String,
+        val changed: Boolean,
+    ) : EngineEvent
+
+    @Serializable
     @SerialName("error")
     data class Error(val session: Long?, val message: String) : EngineEvent
 }

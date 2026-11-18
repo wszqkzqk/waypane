@@ -22,6 +22,13 @@ unsafe extern "C" {
 #[derive(Debug)]
 struct NativeWindowRef(NonNull<c_void>);
 
+// SAFETY: ANativeWindow_fromSurface returns a retained, reference-counted ANativeWindow whose
+// NDK operations may be called from any thread; the retained reference is released exactly once.
+unsafe impl Send for NativeWindowRef {}
+// SAFETY: Shared references never mutate the pointer itself; ANativeWindow's reference counting and
+// underlying buffer-queue operations are thread-safe and only touch it while the reference is alive.
+unsafe impl Sync for NativeWindowRef {}
+
 impl Drop for NativeWindowRef {
     fn drop(&mut self) {
         unsafe { ANativeWindow_release(self.0.as_ptr()) };
