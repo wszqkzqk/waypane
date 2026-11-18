@@ -466,7 +466,14 @@ impl SshSession {
                 remote.socket_path_in(&directory)?
             }
         };
-        handle.streamlocal_forward(socket_path.clone()).await?;
+        handle
+            .streamlocal_forward(socket_path.clone())
+            .await
+            .map_err(|error| {
+                Error::InvalidConfiguration(format!(
+                    "sshd rejected remote streamlocal forwarding for {socket_path}; enable AllowStreamLocalForwarding and AllowTcpForwarding remote or yes on the server: {error}"
+                ))
+            })?;
         let channel = handle.channel_open_session().await?;
         channel
             .exec(true, remote.command_line(&socket_path))
