@@ -76,15 +76,35 @@ impl Canvas {
             view.damage.clone()
         };
         let decoded = decode_regions(&view.data, view, &source_damage)?;
+        let pixel_bytes = (size.width as usize)
+            .checked_mul(size.height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| {
+                ImageError::OutOfBounds(format!(
+                    "layer size {}x{} overflows addressable memory",
+                    size.width, size.height
+                ))
+            })?;
+        if recreate
+            || self
+                .layers
+                .get(&frame.surface_id)
+                .is_some_and(|layer| layer.rgba.len() != pixel_bytes)
+        {
+            self.layers.insert(
+                frame.surface_id,
+                Layer {
+                    size,
+                    offset,
+                    rgba: vec![0; pixel_bytes],
+                    opaque: view.format == ShmFormat::Xrgb8888,
+                },
+            );
+        }
         let layer = self
             .layers
-            .entry(frame.surface_id)
-            .or_insert_with(|| Layer {
-                size,
-                offset,
-                rgba: vec![0; size.width as usize * size.height as usize * 4],
-                opaque: view.format == ShmFormat::Xrgb8888,
-            });
+            .get_mut(&frame.surface_id)
+            .ok_or_else(|| ImageError::OutOfBounds("layer was not allocated".to_string()))?;
         layer.size = size;
         layer.offset = offset;
         layer.opaque = view.format == ShmFormat::Xrgb8888;
@@ -478,5 +498,35 @@ mod tests {
             }
         );
         assert_eq!(uploads[0].rgba, vec![255, 0, 0, 255, 0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn reallocates_layer_pixels_across_repeated_root_resizes() {
+        let mut canvas = Canvas::default();
+        for (width, height) in [(1, 1), (2, 2), (1, 2), (3, 1), (1, 1)] {
+            let mut view = view(width, height, 0);
+            view.format = ShmFormat::Xrgb8888;
+            view.data = [10, 20, 30, 0]
+                .into_iter()
+                .cycle()
+                .take((width * height * 4) as usize)
+                .collect::<Vec<_>>()
+                .into();
+            canvas.apply_frame(&frame(1, view, None)).unwrap();
+            assert_eq!(
+                canvas.size(),
+                Size {
+                    width: width as u32,
+                    height: height as u32,
+                }
+            );
+            assert_eq!(canvas.rgba().len(), (width * height * 4) as usize);
+            assert!(canvas
+                .rgba()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| *pixel == [30, 20, 10, 255]));
+        }
     }
 }
