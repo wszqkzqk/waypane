@@ -21,6 +21,7 @@ struct TestSshd {
     child: tokio::process::Child,
     user: String,
     user_key: PathBuf,
+    rsa_key: PathBuf,
     port: u16,
     termux_tmp: PathBuf,
 }
@@ -36,9 +37,16 @@ impl TestSshd {
         fs::create_dir_all(&root).map_err(|error| error.to_string())?;
         let host_key = root.join("ssh_host_ed25519_key");
         let user_key = root.join("id_ed25519");
-        generate_key(&host_key, "")?;
-        generate_key(&user_key, KEY_PASSPHRASE)?;
-        fs::copy(root.join("id_ed25519.pub"), root.join("authorized_keys"))
+        let rsa_key = root.join("id_rsa");
+        generate_key(&host_key, "ed25519", None, "")?;
+        generate_key(&user_key, "ed25519", None, KEY_PASSPHRASE)?;
+        generate_key(&rsa_key, "rsa", Some("2048"), KEY_PASSPHRASE)?;
+        let authorized_keys = [
+            fs::read_to_string(root.join("id_ed25519.pub")).map_err(|error| error.to_string())?,
+            fs::read_to_string(root.join("id_rsa.pub")).map_err(|error| error.to_string())?,
+        ]
+        .concat();
+        fs::write(root.join("authorized_keys"), authorized_keys)
             .map_err(|error| error.to_string())?;
         let termux_tmp = PathBuf::from("/data/data/com.termux/files/usr/tmp");
         let probe = termux_tmp.join(format!("waypane-write-probe-{}", std::process::id()));
@@ -64,7 +72,7 @@ impl TestSshd {
         fs::write(
             &config,
             format!(
-                "ListenAddress 127.0.0.1\nPort {port}\nHostKey {}\nAuthorizedKeysFile {}\nPidFile {}\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPubkeyAuthentication yes\nAllowAgentForwarding no\nAllowTcpForwarding remote\nX11Forwarding no\nAllowStreamLocalForwarding yes\nSetEnv TMPDIR={}\nPrintMotd no\nLogLevel VERBOSE\n",
+                "ListenAddress 127.0.0.1\nPort {port}\nHostKey {}\nAuthorizedKeysFile {}\nPidFile {}\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPubkeyAuthentication yes\nPubkeyAcceptedAlgorithms ssh-ed25519,rsa-sha2-512,rsa-sha2-256\nAllowAgentForwarding no\nAllowTcpForwarding remote\nX11Forwarding no\nAllowStreamLocalForwarding yes\nSetEnv TMPDIR={}\nPrintMotd no\nLogLevel VERBOSE\n",
                 host_key.display(),
                 root.join("authorized_keys").display(),
                 root.join("sshd.pid").display(),
@@ -96,6 +104,7 @@ impl TestSshd {
                     child,
                     user,
                     user_key,
+                    rsa_key,
                     port,
                     termux_tmp,
                 });
@@ -122,15 +131,25 @@ impl Drop for TestSshd {
     }
 }
 
-fn generate_key(path: &Path, passphrase: &str) -> Result<(), String> {
-    let status = Command::new("ssh-keygen")
+fn generate_key(
+    path: &Path,
+    kind: &str,
+    bits: Option<&str>,
+    passphrase: &str,
+) -> Result<(), String> {
+    let mut command = Command::new("ssh-keygen");
+    command
         .arg("-q")
         .arg("-t")
-        .arg("ed25519")
+        .arg(kind)
         .arg("-N")
         .arg(passphrase)
         .arg("-f")
-        .arg(path)
+        .arg(path);
+    if let Some(bits) = bits {
+        command.arg("-b").arg(bits);
+    }
+    let status = command
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -350,6 +369,31 @@ async fn connects_waypipe_through_sshd_with_tofu_and_termux_tmpdir() {
         }
     }
     let _ = session.shutdown().await;
+
+    let rsa_remote = RemoteWaypipe::new(Compression::Lz4, vec!["true".to_string()])
+        .unwrap()
+        .with_binary(waypipe.to_string_lossy().into_owned());
+    let rsa_config = SshConfig {
+        host: "127.0.0.1".to_string(),
+        port: server.port,
+        user: server.user.clone(),
+        authentication: Authentication::PublicKey {
+            path: server.rsa_key.clone(),
+            passphrase: Some(KEY_PASSPHRASE.to_string()),
+        },
+        known_hosts: Some(known_hosts.clone()),
+        host_key_policy: HostKeyPolicy::Check,
+    };
+    let rsa_session = SshSession::connect(rsa_config, &rsa_remote)
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "RSA-SHA2 authentication failed: {error}; sshd log: {}",
+                fs::read_to_string(server.root.join("sshd.log")).unwrap_or_default()
+            )
+        });
+    assert!(rsa_session.remote_socket().starts_with(&expected_prefix));
+    let _ = rsa_session.shutdown().await;
     server.stop().await;
     if let Err(error) = result {
         panic!(
