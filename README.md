@@ -38,7 +38,18 @@ JNI calls resolve opaque IDs through a synchronized registry into `Arc` snapshot
 in-flight call keeps state alive while `nativeDestroy` removes its public handle. GPU access
 is serialized by `Mutex<GpuRenderer>`. Rendering runs on a dedicated `RenderThread`; dirty-frame
 waits use versioned condition variables, new frames are aligned to VSync with `Choreographer`,
-and static content does not run a 60 Hz polling loop.
+and static content does not run a 60 Hz polling loop. Viewport and view-size changes update
+their shared `AndroidSurface` directly instead of consuming the SSH actor's bounded command
+queue; GPU holds that surface lock through presentation, so a concurrent change cannot be
+cleared as stale.
+
+Android presents every `SurfaceView` at its full size. `ViewportTransform` fits the remote
+buffer without cropping, and `ViewportBlitter` clears the `ANativeWindow` to black and draws a
+transformed, linearly filtered quad inside it. The same transform maps touch and pointer input
+back into content coordinates and divides by `wl_surface.set_buffer_scale`, so letterbox clicks
+are ignored and a touch that leaves the content is cancelled rather than delivered at a clamped
+position. Viewport-only redraws reuse the current frame version and do not manufacture extra
+Wayland frame callbacks.
 
 ## Implemented
 
@@ -92,6 +103,10 @@ and static content does not run a 60 Hz polling loop.
   wgpu surface, `ANativeWindow`, Java surface. `Outdated`/`Timeout` results retry while dirty,
   occluded results wait for visibility callbacks, and RenderThread JNI errors are shown in the
   UI instead of crashing; `WaypaneRust` and `WaypaneRender` expose adapter/format and GPU errors
+- Android always fits remote content without cropping, supports 1x–8x pinch zoom with panning,
+  two-finger scrolling at fit, two-finger tap to toggle 2.5x focus, a Fit reset action, immersive
+  fullscreen, and keep-screen-awake during sessions. Auto-resize is opt-in on every device size;
+  zooming never resizes the remote application, and actual committed buffer sizes drive fitting
 
 ## Build and test
 
@@ -191,6 +206,34 @@ choosing **Trust and save** records it in app-private `known_hosts`. A changed f
 shows an explicit warning before **Replace saved key** is allowed. The Android command field
 accepts only the remote application and its arguments; Waypipe flags are managed by Waypane.
 
+A remote Weston message such as `could not load cursor 'dnd-none'` comes from the cursor theme
+installed in the Termux/Linux environment, not from the Waypipe stream. Install or configure an
+Xcursor theme on that host if cursor shapes are needed; it does not affect desktop frames.
+
+### Android display controls
+
+By default **Auto-resize remote windows** is off. The compositor's fixed output and each client's
+own window geometry therefore stay intact, which is important for full desktops such as Weston.
+The window is fitted entirely inside the available display area without changing its aspect ratio;
+black bars are presentation-only and never become remote input.
+
+- One finger delivers normal Wayland touch down, motion, and up events.
+- Add a second finger to pinch between 1x and 8x and drag to pan any enlarged axis. Beginning this
+  gesture cancels an active remote touch instead of leaving a contact stuck down.
+- At 1x fit, where there is nothing to pan, a two-finger drag is forwarded as smooth scrolling.
+- A quick two-finger tap focuses at 2.5x around the fingers; another two-finger tap or **Fit**
+  restores the complete window. Single-finger double-clicks remain ordinary remote clicks.
+- **Menu** provides Auto-resize, Fit, fullscreen, and closing the remote window. In fullscreen the
+  system bars, app bar, and window tabs are hidden and a small translucent **Menu** remains at the
+  top right; Back first leaves fullscreen and only leaves the session on a second press.
+- The screen stays awake while a session is open and the original screen-on/insets behavior is
+  restored when the session closes or the UI is destroyed.
+
+Enabling **Auto-resize remote windows** sends a configure request matching the available display
+area (in physical pixels, matching the currently advertised Wayland output scale of 1). Wayland
+clients may ignore or adjust that request; Waypane always uses the buffer size the client actually
+commits. Pinch zoom and pan never trigger remote resize requests.
+
 ## Local integration testing
 
 On Unix hosts, `--socket` listens on a local Unix socket. In another process, start the
@@ -218,16 +261,18 @@ window is not counted as presented.
   automated run of the current code reached frame upload and `RedrawRequested`, but AppKit
   reported the 64x64 CLI-created window as `Occluded`, so that run did not claim a new on-screen
   presentation.
-- GitHub Actions run `44345713034` passed formatting/Clippy, all upstream Waypipe integration
+- GitHub Actions run `44456683377` passed formatting/Clippy, all upstream Waypipe integration
   tests, native Windows and macOS checks/tests/release builds, and a complete Android APK
   build with JDK 25, Gradle 9.9.1, AGP 9.5.1, Kotlin 2.4.21, SDK 37.2, and NDK
   30.0.16248370. All three build artifacts were uploaded.
-- The CI-produced Android APK was inspected and contains
-  `lib/arm64-v8a/libwaypane_android.so`, built by the scheduled `rustBuild` task before JNI
-  merging and APK packaging.
-- Neither the Windows desktop binary nor the Android APK has been launched on a physical
-  device, so interactive GUI, input, clipboard, and lifecycle behavior on those platforms
-  remains runtime-unverified.
+- That CI-produced Android APK, containing `lib/arm64-v8a/libwaypane_android.so`, was installed
+  on a physical Xiaomi Android 16 device with a Mali-G610 GPU. It negotiated RGBA8 with Vulkan,
+  connected to Termux Waypipe 0.11.3 over an imported encrypted RSA key, and presented Weston
+  frames. That build still used a Compose aspect-ratio modifier, which cropped a landscape desktop
+  on a portrait phone; it validates the underlying surface/GPU chain, not the newer GPU viewport
+  and gesture implementation.
+- The Windows desktop binary has not been launched on a physical Windows device, so its
+  interactive GUI, input, clipboard, and lifecycle behavior remain runtime-unverified.
 
 ## Known limitations
 
