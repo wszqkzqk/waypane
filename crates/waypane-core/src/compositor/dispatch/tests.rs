@@ -1,5 +1,8 @@
 use super::*;
-use waypipe_client::{ClientConfig, Compression, WAYPIPE_PROTOCOL_VERSION};
+use waypipe_client::{
+    parse_wayland_messages, ClientConfig, Compression, FrameDecoder, MessageType, WaylandMessage,
+    DEFAULT_MAX_FRAME_SIZE, WAYPIPE_PROTOCOL_VERSION,
+};
 
 fn header() -> [u8; 16] {
     let mut bytes = [0u8; 16];
@@ -112,9 +115,8 @@ impl Fixture {
             XdgSurface {
                 surface_id: 10,
                 window_id: Some(1),
-                geometry: None,
-                configure_serial: Some(1),
                 initial_ack_seen: true,
+                ..XdgSurface::default()
             },
         );
         compositor.windows.insert(
@@ -327,7 +329,8 @@ fn hit_testing_targets_topmost_subsurface_then_popup() {
         },
     );
     fixture.compositor.pointer_motion(1, 4.5, 4.5, 1).unwrap();
-    assert_eq!(fixture.compositor.pointer_focus, Some((1, 13, 1.5, 1.5)));
+    assert_eq!(fixture.compositor.pointer_focus, Some((30, 13, 1.5, 1.5)));
+    assert_eq!(fixture.compositor.pointer_window, Some((1, 4.5, 4.5)));
 }
 
 #[test]
@@ -634,6 +637,18 @@ fn tracks_cursor_serial_role_hotspot_and_surface_lifetime() {
         )
         .unwrap();
     fixture.compositor.take_events();
+    let destroy_surface = DecodedRequest {
+        object_id: 61,
+        interface: &wl::WL_SURFACE_INTERFACE,
+        method: method(&wl::WL_SURFACE_INTERFACE, "destroy"),
+        opcode: 0,
+        version: 1,
+        args: Vec::new(),
+    };
+    fixture
+        .compositor
+        .dispatch(&mut fixture.client, &destroy_surface, ObjectKind::Surface)
+        .unwrap();
     fixture
         .compositor
         .finish_destructor(&mut fixture.client, 61, ObjectKind::Surface)
@@ -647,4 +662,1006 @@ fn tracks_cursor_serial_role_hotspot_and_surface_lifetime() {
             ..
         }]
     ));
+}
+
+#[test]
+fn applies_committed_input_regions_to_hit_testing() {
+    let mut fixture = Fixture::new();
+    fixture
+        .compositor
+        .insert_record(70, record(&wl::WL_REGION_INTERFACE))
+        .unwrap();
+    fixture.compositor.regions.insert(70, Region::default());
+    let region_request = |name: &str, rect: Rect| DecodedRequest {
+        object_id: 70,
+        interface: &wl::WL_REGION_INTERFACE,
+        method: method(&wl::WL_REGION_INTERFACE, name),
+        opcode: 0,
+        version: 1,
+        args: vec![
+            Value::Int(rect.x),
+            Value::Int(rect.y),
+            Value::Int(rect.width),
+            Value::Int(rect.height),
+        ],
+    };
+    let outer = Rect {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 100,
+    };
+    let corner = Rect {
+        x: 0,
+        y: 0,
+        width: 20,
+        height: 20,
+    };
+    let hole = Rect {
+        x: 20,
+        y: 20,
+        width: 60,
+        height: 60,
+    };
+    for (name, rect) in [("add", outer), ("add", corner), ("subtract", hole)] {
+        fixture
+            .compositor
+            .dispatch(
+                &mut fixture.client,
+                &region_request(name, rect),
+                ObjectKind::Region,
+            )
+            .unwrap();
+    }
+
+    let set_input_region = |region| DecodedRequest {
+        object_id: 10,
+        interface: &wl::WL_SURFACE_INTERFACE,
+        method: method(&wl::WL_SURFACE_INTERFACE, "set_input_region"),
+        opcode: 0,
+        version: 1,
+        args: vec![Value::Object(region)],
+    };
+    fixture
+        .compositor
+        .dispatch(
+            &mut fixture.client,
+            &set_input_region(Some(70)),
+            ObjectKind::Surface,
+        )
+        .unwrap();
+    fixture
+        .compositor
+        .dispatch(
+            &mut fixture.client,
+            &region_request(
+                "add",
+                Rect {
+                    x: 40,
+                    y: 40,
+                    width: 20,
+                    height: 20,
+                },
+            ),
+            ObjectKind::Region,
+        )
+        .unwrap();
+
+    let original = fixture.compositor.regions[&70].clone();
+    let error = fixture
+        .compositor
+        .dispatch(
+            &mut fixture.client,
+            &region_request(
+                "subtract",
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: -1,
+                    height: 10,
+                },
+            ),
+            ObjectKind::Region,
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("invalid or too complex"), "{error}");
+    assert_eq!(fixture.compositor.regions[&70], original);
+
+    fixture
+        .compositor
+        .commit_surface_now(&mut fixture.client, 10)
+        .unwrap();
+    for (x, y, expected) in [
+        (10.0, 10.0, true),
+        (19.999, 50.0, true),
+        (20.0, 50.0, false),
+        (50.0, 50.0, false),
+        (79.999, 50.0, false),
+        (80.0, 50.0, true),
+        (50.0, 19.999, true),
+        (50.0, 20.0, false),
+        (50.0, 80.0, true),
+        (-0.001, 50.0, false),
+        (100.0, 50.0, false),
+    ] {
+        assert_eq!(
+            fixture.compositor.hit_surface(1, x, y).is_some(),
+            expected,
+            "unexpected hit-testing result at ({x}, {y})"
+        );
+    }
+
+    fixture
+        .compositor
+        .dispatch(
+            &mut fixture.client,
+            &set_input_region(None),
+            ObjectKind::Surface,
+        )
+        .unwrap();
+    fixture
+        .compositor
+        .commit_surface_now(&mut fixture.client, 10)
+        .unwrap();
+    assert!(fixture.compositor.hit_surface(1, 50.0, 50.0).is_some());
+}
+
+fn request(
+    object_id: u32,
+    interface: &'static Interface,
+    name: &str,
+    version: u32,
+    args: Vec<Value>,
+) -> DecodedRequest {
+    let (opcode, method) = interface
+        .requests
+        .iter()
+        .enumerate()
+        .find(|(_, request)| request.name == name)
+        .unwrap_or_else(|| panic!("unknown request {}.{name}", interface.name));
+    DecodedRequest {
+        object_id,
+        interface,
+        method,
+        opcode: opcode as u16,
+        version,
+        args,
+    }
+}
+
+fn outbound_messages(compositor: &mut Compositor, client: &mut Client) -> Vec<WaylandMessage> {
+    let messages = compositor.take_outgoing();
+    if messages.is_empty() {
+        return Vec::new();
+    }
+    let encoded = client.encode_messages(&messages).unwrap();
+    let mut decoder = FrameDecoder::new(DEFAULT_MAX_FRAME_SIZE);
+    decoder.push(&encoded);
+    let mut decoded = Vec::new();
+    while let Some(frame) = decoder.next_frame().unwrap() {
+        if frame.kind == MessageType::Protocol {
+            decoded.extend(parse_wayland_messages(frame.payload).unwrap());
+        }
+    }
+    decoded
+}
+
+#[test]
+fn configures_repositions_and_grabs_popups() {
+    let mut fixture = Fixture::new();
+    fixture.compositor.windows.get_mut(&1).unwrap().geometry = Rect {
+        x: 0,
+        y: 0,
+        width: 500,
+        height: 300,
+    };
+    fixture
+        .compositor
+        .surfaces
+        .get_mut(&10)
+        .unwrap()
+        .logical_size = Size {
+        width: 500,
+        height: 300,
+    };
+    for id in [30, 40] {
+        fixture
+            .compositor
+            .insert_record(id, record(&wl::WL_SURFACE_INTERFACE))
+            .unwrap();
+    }
+    fixture.compositor.surfaces.insert(40, Surface::default());
+    replace_record(&mut fixture, 30, &xdg::XDG_SURFACE_INTERFACE);
+    fixture.compositor.xdg_surfaces.insert(
+        30,
+        XdgSurface {
+            surface_id: 40,
+            ..XdgSurface::default()
+        },
+    );
+    fixture.compositor.surfaces.insert(30, Surface::default());
+    replace_record(&mut fixture, 41, &xdg::XDG_POSITIONER_INTERFACE);
+    fixture.compositor.positioners.insert(
+        41,
+        Positioner {
+            size: Some((100, 50)),
+            anchor_rect: Some(Rect {
+                x: 450,
+                y: 280,
+                width: 20,
+                height: 20,
+            }),
+            anchor: 8,
+            gravity: 8,
+            constraint_adjustment: xdg_shell::FLIP_X | xdg_shell::FLIP_Y,
+            ..Positioner::default()
+        },
+    );
+    fixture
+        .compositor
+        .dispatch(
+            &mut fixture.client,
+            &request(
+                30,
+                &xdg::XDG_SURFACE_INTERFACE,
+                "get_popup",
+                6,
+                vec![
+                    Value::NewId {
+                        id: 90,
+                        interface: Some(&xdg::XDG_POPUP_INTERFACE),
+                    },
+                    Value::Object(Some(20)),
+                    Value::Object(Some(41)),
+                ],
+            ),
+            ObjectKind::XdgSurface,
+        )
+        .unwrap();
+    let flipped = Rect {
+        x: 350,
+        y: 230,
+        width: 100,
+        height: 50,
+    };
+    assert_eq!(fixture.compositor.windows[&90].geometry, flipped);
+    assert_eq!(
+        fixture.compositor.xdg_surfaces[&30].pending_geometry,
+        Some(flipped)
+    );
+    let serial = fixture.compositor.xdg_surfaces[&30]
+        .configure_serial
+        .unwrap();
+    fixture
+        .compositor
+        .dispatch(
+            &mut fixture.client,
+            &request(
+                30,
+                &xdg::XDG_SURFACE_INTERFACE,
+                "ack_configure",
+                6,
+                vec![Value::Uint(serial)],
+            ),
+            ObjectKind::XdgSurface,
+        )
+        .unwrap();
+    assert_eq!(fixture.compositor.xdg_surfaces[&30].configure_serial, None);
+    assert!(fixture
+        .compositor
+        .dispatch(
+            &mut fixture.client,
+            &request(
+                30,
+                &xdg::XDG_SURFACE_INTERFACE,
+                "ack_configure",
+                6,
+                vec![Value::Uint(serial)],
+            ),
+            ObjectKind::XdgSurface,
+        )
+        .is_err());
+    fixture.compositor.take_events();
+    fixture.compositor.take_outgoing();
+
+    fixture.compositor.positioners.insert(
+        41,
+        Positioner {
+            size: Some((600, 400)),
+            anchor_rect: Some(Rect {
+                x: 450,
+                y: 250,
+                width: 50,
+                height: 50,
+            }),
+            constraint_adjustment: xdg_shell::RESIZE_X | xdg_shell::RESIZE_Y,
+            ..Positioner::default()
+        },
+    );
+    fixture
+        .compositor
+        .dispatch(
+            &mut fixture.client,
+            &request(
+                90,
+                &xdg::XDG_POPUP_INTERFACE,
+                "reposition",
+                3,
+                vec![Value::Object(Some(41)), Value::Uint(77)],
+            ),
+            ObjectKind::XdgPopup,
+        )
+        .unwrap();
+    let resized = Rect {
+        x: 175,
+        y: 75,
+        width: 325,
+        height: 225,
+    };
+    assert_eq!(fixture.compositor.windows[&90].geometry, flipped);
+    assert_eq!(
+        fixture.compositor.xdg_surfaces[&30].pending_geometry,
+        Some(resized)
+    );
+    let messages = outbound_messages(&mut fixture.compositor, &mut fixture.client);
+    assert_eq!(messages.len(), 3, "unexpected messages: {messages:?}");
+    assert_eq!(messages[0].object_id(), 90);
+    assert_eq!(
+        messages[0].opcode(),
+        event_opcode(&xdg::XDG_POPUP_INTERFACE, "repositioned")
+    );
+    assert_eq!(
+        u32::from_le_bytes(messages[0].payload()[..4].try_into().unwrap()),
+        77
+    );
+    assert_eq!(messages[1].object_id(), 90);
+    assert_eq!(
+        messages[1].opcode(),
+        event_opcode(&xdg::XDG_POPUP_INTERFACE, "configure")
+    );
+    let configure = messages[1]
+        .payload()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| i32::from_le_bytes(*bytes))
+        .collect::<Vec<_>>();
+    assert_eq!(configure, [175, 75, 325, 225]);
+    assert_eq!(messages[2].object_id(), 30);
+    assert_eq!(
+        messages[2].opcode(),
+        event_opcode(&xdg::XDG_SURFACE_INTERFACE, "configure")
+    );
+    let serial = u32::from_le_bytes(messages[2].payload()[..4].try_into().unwrap());
+    fixture
+        .compositor
+        .dispatch(
+            &mut fixture.client,
+            &request(
+                30,
+                &xdg::XDG_SURFACE_INTERFACE,
+                "ack_configure",
+                6,
+                vec![Value::Uint(serial)],
+            ),
+            ObjectKind::XdgSurface,
+        )
+        .unwrap();
+    assert_eq!(fixture.compositor.windows[&90].geometry, resized);
+
+    fixture.compositor.popup_positioners.insert(
+        90,
+        Positioner {
+            size: Some((100, 50)),
+            anchor_rect: Some(Rect {
+                x: 350,
+                y: 150,
+                width: 20,
+                height: 20,
+            }),
+            anchor: 6,
+            gravity: 8,
+            constraint_adjustment: xdg_shell::SLIDE_X | xdg_shell::SLIDE_Y,
+            reactive: true,
+            ..Positioner::default()
+        },
+    );
+    fixture
+        .compositor
+        .configure_window(
+            1,
+            Some(Size {
+                width: 400,
+                height: 200,
+            }),
+            Vec::new(),
+        )
+        .unwrap();
+    let reactive = Rect {
+        x: 300,
+        y: 150,
+        width: 100,
+        height: 50,
+    };
+    assert_eq!(
+        fixture.compositor.xdg_surfaces[&30].pending_geometry,
+        Some(reactive)
+    );
+    let serial = fixture.compositor.xdg_surfaces[&30]
+        .configure_serial
+        .unwrap();
+    fixture
+        .compositor
+        .dispatch(
+            &mut fixture.client,
+            &request(
+                30,
+                &xdg::XDG_SURFACE_INTERFACE,
+                "ack_configure",
+                6,
+                vec![Value::Uint(serial)],
+            ),
+            ObjectKind::XdgSurface,
+        )
+        .unwrap();
+    assert_eq!(fixture.compositor.windows[&90].geometry, reactive);
+
+    replace_record(&mut fixture, 70, &wl::WL_SEAT_INTERFACE);
+    replace_record(&mut fixture, 60, &wl::WL_POINTER_INTERFACE);
+    fixture.compositor.seats.insert(
+        70,
+        Seat {
+            pointers: vec![60],
+            ..Seat::default()
+        },
+    );
+    fixture
+        .compositor
+        .pointer_motion(1, 320.0, 175.0, 1)
+        .unwrap();
+    assert_eq!(
+        fixture.compositor.pointer_focus.map(|focus| focus.0),
+        Some(90)
+    );
+    fixture.compositor.pointer_button(0x110, true, 1).unwrap();
+    let serial = *fixture.compositor.input_serials.back().unwrap();
+    fixture
+        .compositor
+        .dispatch(
+            &mut fixture.client,
+            &request(
+                90,
+                &xdg::XDG_POPUP_INTERFACE,
+                "grab",
+                1,
+                vec![Value::Object(Some(70)), Value::Uint(serial)],
+            ),
+            ObjectKind::XdgPopup,
+        )
+        .unwrap();
+    assert_eq!(fixture.compositor.popup_grab, [90]);
+    assert_eq!(fixture.compositor.keyboard_focus, Some(90));
+    fixture.compositor.take_outgoing();
+    fixture.compositor.pointer_motion(1, 10.0, 10.0, 2).unwrap();
+    assert_eq!(fixture.compositor.popup_grab, [90]);
+    assert!(
+        !outbound_messages(&mut fixture.compositor, &mut fixture.client)
+            .iter()
+            .any(|message| message.object_id() == 90
+                && message.opcode() == event_opcode(&xdg::XDG_POPUP_INTERFACE, "popup_done"))
+    );
+    fixture.compositor.pointer_button(0x110, true, 3).unwrap();
+    assert!(fixture.compositor.popup_grab.is_empty());
+    assert!(
+        outbound_messages(&mut fixture.compositor, &mut fixture.client)
+            .iter()
+            .any(|message| message.object_id() == 90
+                && message.opcode() == event_opcode(&xdg::XDG_POPUP_INTERFACE, "popup_done"))
+    );
+}
+
+fn replace_record(fixture: &mut Fixture, id: u32, interface: &'static Interface) {
+    if fixture.compositor.objects.contains_key(&id) {
+        fixture.compositor.objects.remove(&id);
+    }
+    fixture
+        .compositor
+        .insert_record(id, record(interface))
+        .unwrap();
+}
+
+#[test]
+fn enforces_toplevel_size_limits_and_unacknowledged_serials() {
+    let mut fixture = Fixture::new();
+    for (name, width, height) in [("set_min_size", 200, 100), ("set_max_size", 800, 600)] {
+        fixture
+            .compositor
+            .dispatch(
+                &mut fixture.client,
+                &request(
+                    1,
+                    &xdg::XDG_TOPLEVEL_INTERFACE,
+                    name,
+                    1,
+                    vec![Value::Int(width), Value::Int(height)],
+                ),
+                ObjectKind::XdgToplevel,
+            )
+            .unwrap();
+    }
+    fixture
+        .compositor
+        .configure_window(
+            1,
+            Some(Size {
+                width: 50,
+                height: 2000,
+            }),
+            Vec::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        fixture.compositor.xdg_surfaces[&20].configured_size,
+        Some(Size {
+            width: 200,
+            height: 600
+        })
+    );
+    let serial = fixture.compositor.xdg_surfaces[&20]
+        .configure_serial
+        .unwrap();
+    fixture
+        .compositor
+        .dispatch(
+            &mut fixture.client,
+            &request(
+                20,
+                &xdg::XDG_SURFACE_INTERFACE,
+                "ack_configure",
+                1,
+                vec![Value::Uint(serial)],
+            ),
+            ObjectKind::XdgSurface,
+        )
+        .unwrap();
+    assert!(fixture
+        .compositor
+        .dispatch(
+            &mut fixture.client,
+            &request(
+                20,
+                &xdg::XDG_SURFACE_INTERFACE,
+                "ack_configure",
+                1,
+                vec![Value::Uint(serial)],
+            ),
+            ObjectKind::XdgSurface,
+        )
+        .is_err());
+
+    assert!(fixture
+        .compositor
+        .dispatch(
+            &mut fixture.client,
+            &request(
+                1,
+                &xdg::XDG_TOPLEVEL_INTERFACE,
+                "set_min_size",
+                1,
+                vec![Value::Int(900), Value::Int(100)],
+            ),
+            ObjectKind::XdgToplevel,
+        )
+        .is_err());
+    assert_eq!(
+        fixture.compositor.xdg_surfaces[&20].min_size,
+        Size {
+            width: 200,
+            height: 100
+        }
+    );
+    assert!(fixture
+        .compositor
+        .dispatch(
+            &mut fixture.client,
+            &request(
+                1,
+                &xdg::XDG_TOPLEVEL_INTERFACE,
+                "set_max_size",
+                1,
+                vec![Value::Int(0), Value::Int(500)],
+            ),
+            ObjectKind::XdgToplevel,
+        )
+        .is_err());
+
+    fixture
+        .compositor
+        .configure_window(
+            1,
+            Some(Size {
+                width: 50,
+                height: 2000,
+            }),
+            Vec::new(),
+        )
+        .unwrap();
+    fixture
+        .compositor
+        .dispatch(
+            &mut fixture.client,
+            &request(
+                1,
+                &xdg::XDG_TOPLEVEL_INTERFACE,
+                "set_max_size",
+                1,
+                vec![Value::Int(400), Value::Int(300)],
+            ),
+            ObjectKind::XdgToplevel,
+        )
+        .unwrap();
+    assert_eq!(
+        fixture.compositor.xdg_surfaces[&20].configured_size,
+        Some(Size {
+            width: 200,
+            height: 300
+        })
+    );
+}
+
+#[test]
+fn forwards_evdev_keycodes_once_per_logical_transition() {
+    let mut fixture = Fixture::new();
+    replace_record(&mut fixture, 70, &wl::WL_SEAT_INTERFACE);
+    replace_record(&mut fixture, 61, &wl::WL_KEYBOARD_INTERFACE);
+    fixture.compositor.seats.insert(
+        70,
+        Seat {
+            keyboards: vec![61],
+            ..Seat::default()
+        },
+    );
+    fixture.compositor.keyboard_focus(Some(1)).unwrap();
+    fixture.compositor.take_outgoing();
+    fixture.compositor.key(1, true, 10).unwrap();
+    fixture.compositor.key(42, true, 20).unwrap();
+    fixture.compositor.key(42, true, 21).unwrap();
+    fixture.compositor.key(42, false, 30).unwrap();
+    fixture.compositor.key(42, false, 31).unwrap();
+    fixture.compositor.key(2, true, 40).unwrap();
+    let messages = outbound_messages(&mut fixture.compositor, &mut fixture.client);
+    let key_opcode = event_opcode(&wl::WL_KEYBOARD_INTERFACE, "key");
+    let keys = messages
+        .iter()
+        .filter(|message| message.object_id() == 61 && message.opcode() == key_opcode)
+        .map(|message| {
+            let words = message
+                .payload()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|bytes| u32::from_le_bytes(*bytes))
+                .collect::<Vec<_>>();
+            (words[1], words[2], words[3])
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(keys, [(10, 1, 1), (20, 42, 1), (30, 42, 0), (40, 2, 1)]);
+
+    fixture.compositor.keyboard_focus(None).unwrap();
+    fixture.compositor.take_outgoing();
+    fixture.compositor.key(2, false, 50).unwrap();
+    assert!(
+        !outbound_messages(&mut fixture.compositor, &mut fixture.client)
+            .iter()
+            .any(|message| message.opcode() == key_opcode)
+    );
+}
+
+#[test]
+fn every_supported_request_has_an_explicit_routing_policy() {
+    let objects: &[(&Interface, u32)] = &[
+        (&wl::WL_DISPLAY_INTERFACE, 1),
+        (&wl::WL_REGISTRY_INTERFACE, 1),
+        (&wl::WL_CALLBACK_INTERFACE, 1),
+        (&wl::WL_COMPOSITOR_INTERFACE, 6),
+        (&wl::WL_SUBCOMPOSITOR_INTERFACE, 1),
+        (&wl::WL_SHM_INTERFACE, 2),
+        (&wl::WL_SHM_POOL_INTERFACE, 1),
+        (&wl::WL_BUFFER_INTERFACE, 1),
+        (&wl::WL_SURFACE_INTERFACE, 6),
+        (&wl::WL_SUBSURFACE_INTERFACE, 1),
+        (&wl::WL_REGION_INTERFACE, 1),
+        (&xdg::XDG_WM_BASE_INTERFACE, 6),
+        (&xdg::XDG_SURFACE_INTERFACE, 6),
+        (&xdg::XDG_TOPLEVEL_INTERFACE, 6),
+        (&xdg::XDG_POPUP_INTERFACE, 6),
+        (&xdg::XDG_POSITIONER_INTERFACE, 6),
+        (&wl::WL_SEAT_INTERFACE, 9),
+        (&wl::WL_KEYBOARD_INTERFACE, 9),
+        (&wl::WL_POINTER_INTERFACE, 9),
+        (&wl::WL_TOUCH_INTERFACE, 9),
+        (&wl::WL_OUTPUT_INTERFACE, 4),
+        (&wl::WL_DATA_DEVICE_MANAGER_INTERFACE, 3),
+        (&wl::WL_DATA_DEVICE_INTERFACE, 3),
+        (&wl::WL_DATA_SOURCE_INTERFACE, 3),
+        (&wl::WL_DATA_OFFER_INTERFACE, 3),
+        (
+            &crate::protocol::text_input::ZWP_TEXT_INPUT_MANAGER_V3_INTERFACE,
+            1,
+        ),
+        (&crate::protocol::text_input::ZWP_TEXT_INPUT_V3_INTERFACE, 1),
+    ];
+    for (interface, version) in objects {
+        let kind = ObjectRecord::new(interface, *version).kind;
+        let routed = routed_requests(kind);
+        for request in interface
+            .requests
+            .iter()
+            .filter(|request| request.since <= *version)
+        {
+            if !request.is_destructor {
+                assert!(
+                    routed.contains(&request.name),
+                    "{}.{} since {} has no explicit routing policy",
+                    interface.name,
+                    request.name,
+                    request.since
+                );
+            }
+        }
+        for name in routed {
+            assert!(
+                interface
+                    .requests
+                    .iter()
+                    .any(|request| request.name == *name),
+                "stale route {}.{name}",
+                interface.name
+            );
+        }
+    }
+}
+
+fn routed_requests(kind: ObjectKind) -> &'static [&'static str] {
+    match kind {
+        ObjectKind::Display => &["sync", "get_registry"],
+        ObjectKind::Registry => &["bind"],
+        ObjectKind::Callback
+        | ObjectKind::Buffer
+        | ObjectKind::Keyboard
+        | ObjectKind::Touch
+        | ObjectKind::Output
+        | ObjectKind::Other => &[],
+        ObjectKind::Compositor => &["create_surface", "create_region"],
+        ObjectKind::Subcompositor => &["get_subsurface"],
+        ObjectKind::Shm => &["create_pool"],
+        ObjectKind::ShmPool => &["create_buffer", "resize"],
+        ObjectKind::Surface => &[
+            "attach",
+            "damage",
+            "frame",
+            "set_opaque_region",
+            "set_input_region",
+            "commit",
+            "set_buffer_transform",
+            "set_buffer_scale",
+            "damage_buffer",
+            "offset",
+        ],
+        ObjectKind::Subsurface => &[
+            "set_position",
+            "place_above",
+            "place_below",
+            "set_sync",
+            "set_desync",
+        ],
+        ObjectKind::Region => &["add", "subtract"],
+        ObjectKind::XdgWmBase => &["create_positioner", "get_xdg_surface", "pong"],
+        ObjectKind::XdgSurface => &[
+            "get_toplevel",
+            "get_popup",
+            "set_window_geometry",
+            "ack_configure",
+        ],
+        ObjectKind::XdgToplevel => &[
+            "set_parent",
+            "set_title",
+            "set_app_id",
+            "show_window_menu",
+            "move",
+            "resize",
+            "set_max_size",
+            "set_min_size",
+            "set_maximized",
+            "unset_maximized",
+            "set_fullscreen",
+            "unset_fullscreen",
+            "set_minimized",
+        ],
+        ObjectKind::XdgPopup => &["grab", "reposition"],
+        ObjectKind::XdgPositioner => &[
+            "set_size",
+            "set_anchor_rect",
+            "set_anchor",
+            "set_gravity",
+            "set_constraint_adjustment",
+            "set_offset",
+            "set_reactive",
+            "set_parent_size",
+            "set_parent_configure",
+        ],
+        ObjectKind::Seat => &["get_pointer", "get_keyboard", "get_touch"],
+        ObjectKind::Pointer => &["set_cursor"],
+        ObjectKind::DataDeviceManager => &["create_data_source", "get_data_device"],
+        ObjectKind::DataDevice => &["start_drag", "set_selection"],
+        ObjectKind::DataSource => &["offer", "set_actions"],
+        ObjectKind::DataOffer => &["accept", "receive", "set_actions", "finish"],
+        ObjectKind::TextInputManager => &["get_text_input"],
+        ObjectKind::TextInput => &[
+            "enable",
+            "disable",
+            "set_surrounding_text",
+            "set_text_change_cause",
+            "set_content_type",
+            "set_cursor_rectangle",
+            "commit",
+        ],
+    }
+}
+
+#[test]
+fn tracks_surface_output_membership_across_mapping_and_release() {
+    let mut fixture = Fixture::new();
+    for id in [80, 81] {
+        replace_record(&mut fixture, id, &wl::WL_OUTPUT_INTERFACE);
+    }
+    fixture.compositor.outputs.push(80);
+    fixture
+        .compositor
+        .surfaces
+        .get_mut(&10)
+        .unwrap()
+        .pending
+        .attach = Some(Some(51));
+    fixture
+        .compositor
+        .commit_surface_now(&mut fixture.client, 10)
+        .unwrap();
+    assert!(fixture.compositor.surfaces[&10].mapped);
+    assert_eq!(fixture.compositor.surfaces[&10].outputs, [80]);
+    assert_eq!(
+        surface_output_events(
+            &outbound_messages(&mut fixture.compositor, &mut fixture.client),
+            "enter"
+        ),
+        [(10, 80)]
+    );
+    fixture.compositor.take_events();
+
+    fixture
+        .compositor
+        .commit_surface_now(&mut fixture.client, 10)
+        .unwrap();
+    assert!(fixture.compositor.take_events().is_empty());
+    assert!(outbound_messages(&mut fixture.compositor, &mut fixture.client).is_empty());
+
+    fixture.compositor.outputs.push(81);
+    fixture.compositor.set_surface_mapped(10, true);
+    assert_eq!(fixture.compositor.surfaces[&10].outputs, [80, 81]);
+    assert_eq!(
+        surface_output_events(
+            &outbound_messages(&mut fixture.compositor, &mut fixture.client),
+            "enter"
+        ),
+        [(10, 81)]
+    );
+
+    assert!(fixture
+        .compositor
+        .dispatch(
+            &mut fixture.client,
+            &request(
+                5,
+                &xdg::XDG_WM_BASE_INTERFACE,
+                "get_xdg_surface",
+                6,
+                vec![
+                    Value::NewId {
+                        id: 90,
+                        interface: Some(&xdg::XDG_SURFACE_INTERFACE),
+                    },
+                    Value::Object(Some(10)),
+                ],
+            ),
+            ObjectKind::XdgWmBase,
+        )
+        .is_err());
+
+    fixture
+        .compositor
+        .surfaces
+        .get_mut(&10)
+        .unwrap()
+        .pending
+        .attach = Some(None);
+    fixture
+        .compositor
+        .commit_surface_now(&mut fixture.client, 10)
+        .unwrap();
+    assert!(!fixture.compositor.surfaces[&10].mapped);
+    assert!(fixture.compositor.surfaces[&10].outputs.is_empty());
+    assert_eq!(
+        surface_output_events(
+            &outbound_messages(&mut fixture.compositor, &mut fixture.client),
+            "leave"
+        ),
+        [(10, 80), (10, 81)]
+    );
+    fixture.compositor.take_events();
+
+    fixture
+        .compositor
+        .surfaces
+        .get_mut(&10)
+        .unwrap()
+        .pending
+        .attach = Some(Some(52));
+    fixture
+        .compositor
+        .commit_surface_now(&mut fixture.client, 10)
+        .unwrap();
+    assert_eq!(
+        surface_output_events(
+            &outbound_messages(&mut fixture.compositor, &mut fixture.client),
+            "enter"
+        ),
+        [(10, 80), (10, 81)]
+    );
+    fixture
+        .compositor
+        .finish_destructor(&mut fixture.client, 80, ObjectKind::Output)
+        .unwrap();
+    assert_eq!(fixture.compositor.outputs, [81]);
+    assert_eq!(fixture.compositor.surfaces[&10].outputs, [81]);
+    assert_eq!(
+        surface_output_events(
+            &outbound_messages(&mut fixture.compositor, &mut fixture.client),
+            "leave"
+        ),
+        [(10, 80)]
+    );
+
+    fixture
+        .compositor
+        .surfaces
+        .get_mut(&10)
+        .unwrap()
+        .pending
+        .attach = Some(None);
+    fixture
+        .compositor
+        .commit_surface_now(&mut fixture.client, 10)
+        .unwrap();
+    assert_eq!(
+        surface_output_events(
+            &outbound_messages(&mut fixture.compositor, &mut fixture.client),
+            "leave"
+        ),
+        [(10, 81)]
+    );
+}
+
+fn surface_output_events(messages: &[WaylandMessage], name: &str) -> Vec<(u32, u32)> {
+    let opcode = event_opcode(&wl::WL_SURFACE_INTERFACE, name);
+    messages
+        .iter()
+        .filter(|message| message.object_id() != 1 && message.opcode() == opcode)
+        .map(|message| {
+            (
+                message.object_id(),
+                u32::from_le_bytes(message.payload()[..4].try_into().unwrap()),
+            )
+        })
+        .collect()
 }

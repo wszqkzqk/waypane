@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 use crate::wayland_backend::protocol::Interface;
@@ -13,6 +13,7 @@ use crate::protocol::{
 mod clipboard;
 mod dispatch;
 mod text_input;
+mod xdg_shell;
 use crate::state::*;
 use crate::types::*;
 
@@ -64,11 +65,13 @@ struct PendingFrame {
 pub struct Compositor {
     objects: BTreeMap<u32, ObjectRecord>,
     surfaces: BTreeMap<u32, Surface>,
+    regions: BTreeMap<u32, Region>,
     pools: BTreeMap<u32, Pool>,
     buffers: BTreeMap<u32, Buffer>,
     xdg_surfaces: BTreeMap<u32, XdgSurface>,
     windows: BTreeMap<WindowId, Window>,
     positioners: BTreeMap<u32, Positioner>,
+    popup_positioners: BTreeMap<WindowId, Positioner>,
     seats: BTreeMap<u32, Seat>,
     pointers: BTreeMap<u32, PointerState>,
     outputs: Vec<u32>,
@@ -78,6 +81,7 @@ pub struct Compositor {
     selection: Option<SelectionState>,
     clipboard_reads: BTreeMap<Rid, ClipboardRead>,
     subsurface_stacks: BTreeMap<u32, Vec<u32>>,
+    published_z_orders: BTreeMap<WindowId, Vec<SurfaceId>>,
     subsurface_sync: BTreeMap<u32, SubsurfaceSync>,
     next_server_id: u32,
     outbound: Vec<ProtocolMessage>,
@@ -92,6 +96,9 @@ pub struct Compositor {
     pointer_focus: Option<(WindowId, SurfaceId, f64, f64)>,
     pointer_window: Option<(WindowId, f64, f64)>,
     active_pointer: Option<u32>,
+    popup_grab: Vec<WindowId>,
+    input_serials: VecDeque<u32>,
+    pressed_keys: BTreeSet<u32>,
     touches: BTreeMap<i32, (SurfaceId, f64, f64)>,
     text_inputs: BTreeMap<u32, TextInput>,
     modifiers: Modifiers,
@@ -104,11 +111,13 @@ impl Compositor {
         Self {
             objects,
             surfaces: BTreeMap::new(),
+            regions: BTreeMap::new(),
             pools: BTreeMap::new(),
             buffers: BTreeMap::new(),
             xdg_surfaces: BTreeMap::new(),
             windows: BTreeMap::new(),
             positioners: BTreeMap::new(),
+            popup_positioners: BTreeMap::new(),
             seats: BTreeMap::new(),
             pointers: BTreeMap::new(),
             outputs: Vec::new(),
@@ -118,6 +127,7 @@ impl Compositor {
             selection: None,
             clipboard_reads: BTreeMap::new(),
             subsurface_stacks: BTreeMap::new(),
+            published_z_orders: BTreeMap::new(),
             subsurface_sync: BTreeMap::new(),
             next_server_id: 0xff00_0000,
             outbound: Vec::new(),
@@ -135,6 +145,9 @@ impl Compositor {
             pointer_focus: None,
             pointer_window: None,
             active_pointer: None,
+            popup_grab: Vec::new(),
+            input_serials: VecDeque::new(),
+            pressed_keys: BTreeSet::new(),
             touches: BTreeMap::new(),
             text_inputs: BTreeMap::new(),
             modifiers: Modifiers::default(),
@@ -218,42 +231,6 @@ impl Compositor {
         Ok(())
     }
 
-    pub fn configure_window(
-        &mut self,
-        id: WindowId,
-        size: Option<Size>,
-        mut states: Vec<u32>,
-    ) -> Result<()> {
-        if !states.contains(&4) {
-            let activated = self.keyboard_focus == Some(id);
-            if activated {
-                states.push(4);
-            }
-        }
-        let serial = self.next_serial();
-        let xdg_surface_id = {
-            let xdg_surface = self
-                .xdg_surfaces
-                .values_mut()
-                .find(|surface| surface.window_id == Some(id))
-                .ok_or_else(|| Error::protocol(format!("unknown window {id}")))?;
-            if !matches!(
-                self.windows.get(&id).map(|w| w.kind),
-                Some(WindowKind::Toplevel)
-            ) {
-                return Err(Error::protocol(
-                    "popup windows cannot receive toplevel configure",
-                ));
-            }
-            xdg_surface.configure_serial = Some(serial);
-            self.windows[&id].xdg_surface_id
-        };
-        self.send_configure(id, xdg_surface_id, size, &states, serial);
-        self.events
-            .push(CoreEvent::WindowConfigured { id, size, states });
-        Ok(())
-    }
-
     pub fn close_window(&mut self, id: WindowId) -> Result<()> {
         match self.windows.get(&id).map(|window| window.kind) {
             Some(WindowKind::Toplevel) => {
@@ -272,6 +249,8 @@ impl Compositor {
         if self.keyboard_focus == window_id {
             return Ok(());
         }
+        self.pressed_keys.clear();
+        self.modifiers = Modifiers::default();
         let old_surface = self
             .keyboard_focus
             .and_then(|id| self.windows.get(&id))
@@ -335,7 +314,15 @@ impl Compositor {
             .values()
             .flat_map(|seat| seat.pointers.iter().copied())
             .collect::<Vec<_>>();
-        let target_focus = target.map(|(surface, _, _)| (window_id.unwrap_or_default(), surface));
+        let target_window = target
+            .and_then(|(surface, _, _)| {
+                self.surfaces
+                    .get(&surface)
+                    .and_then(|surface| surface.window_id)
+            })
+            .or(window_id);
+        let target_focus =
+            target.map(|(surface, _, _)| (target_window.unwrap_or_default(), surface));
         for pointer in pointers {
             let previous = self.pointers.entry(pointer).or_default().focus;
             if previous == target_focus {
@@ -352,6 +339,7 @@ impl Compositor {
                     );
                 }
                 if Some(old_window) != window_id
+                    && !self.popup_grab.contains(&old_window)
                     && self
                         .windows
                         .get(&old_window)
@@ -374,8 +362,11 @@ impl Compositor {
                     ],
                 );
                 self.emit(&wl::WL_POINTER_INTERFACE, "frame", pointer, &[]);
+                if let Some(cursor) = self.pointers.get(&pointer).and_then(|state| state.cursor) {
+                    self.set_surface_mapped(cursor.surface, false);
+                }
                 let state = self.pointers.entry(pointer).or_default();
-                state.focus = Some((window_id.unwrap_or_default(), surface));
+                state.focus = Some((target_window.unwrap_or_default(), surface));
                 state.enter_serial = Some(serial);
                 state.cursor = None;
                 self.active_pointer = Some(pointer);
@@ -389,7 +380,7 @@ impl Compositor {
             }
         }
         self.pointer_focus = target.map(|(surface, local_x, local_y)| {
-            (window_id.unwrap_or_default(), surface, local_x, local_y)
+            (target_window.unwrap_or_default(), surface, local_x, local_y)
         });
         self.pointer_window = target.map(|_| (window_id.unwrap_or_default(), x, y));
         if let Some((_surface, local_x, local_y)) = target {
@@ -402,10 +393,15 @@ impl Compositor {
         let Some((surface, local_x, local_y)) = self.hit_surface(window_id, x, y) else {
             return Ok(());
         };
-        if self.pointer_focus.map(|focus| (focus.0, focus.1)) != Some((window_id, surface)) {
+        let focus_window = self
+            .surfaces
+            .get(&surface)
+            .and_then(|surface| surface.window_id)
+            .unwrap_or(window_id);
+        if self.pointer_focus.map(|focus| (focus.0, focus.1)) != Some((focus_window, surface)) {
             return self.pointer_focus(Some(window_id), x, y);
         }
-        self.pointer_focus = Some((window_id, surface, local_x, local_y));
+        self.pointer_focus = Some((focus_window, surface, local_x, local_y));
         self.pointer_window = Some((window_id, x, y));
         self.emit_pointer_motion(local_x, local_y, time);
         Ok(())
@@ -415,12 +411,9 @@ impl Compositor {
         let pointer = self.active_pointer?;
         let cursor = self.pointers.get(&pointer)?.cursor?;
         let (window, x, y) = self.pointer_window?;
-        (self.pointer_focus.map(|focus| focus.0) == Some(window)).then_some((
-            window,
-            x,
-            y,
-            cursor.hotspot,
-        ))
+        self.pointer_focus
+            .is_some()
+            .then_some((window, x, y, cursor.hotspot))
     }
 
     fn emit_pointer_motion(&mut self, x: f64, y: f64, time: u32) {
@@ -442,17 +435,20 @@ impl Compositor {
 
     fn hit_surface(&self, window_id: WindowId, x: f64, y: f64) -> Option<(SurfaceId, f64, f64)> {
         let window = self.windows.get(&window_id)?;
-        if matches!(window.kind, WindowKind::Popup { .. }) {
-            return Some((window.surface_id, x, y));
+        if !matches!(window.kind, WindowKind::Popup { .. }) {
+            if let Some((popup, local_x, local_y)) = self.hit_popup(window_id, x, y) {
+                let surface = self.windows[&popup].surface_id;
+                return self.hit_subsurface(surface, local_x, local_y).or_else(|| {
+                    self.surface_accepts_input(surface, local_x, local_y)
+                        .then_some((surface, local_x, local_y))
+                });
+            }
         }
-        if let Some((popup, local_x, local_y)) = self.hit_popup(window_id, x, y) {
-            let surface = self.windows[&popup].surface_id;
-            return self
-                .hit_subsurface(surface, local_x, local_y)
-                .or(Some((surface, local_x, local_y)));
-        }
-        self.hit_subsurface(window.surface_id, x, y)
-            .or(Some((window.surface_id, x, y)))
+        let surface = window.surface_id;
+        self.hit_subsurface(surface, x, y).or_else(|| {
+            self.surface_accepts_input(surface, x, y)
+                .then_some((surface, x, y))
+        })
     }
 
     fn hit_popup(&self, parent: WindowId, x: f64, y: f64) -> Option<(WindowId, f64, f64)> {
@@ -462,20 +458,25 @@ impl Compositor {
                 continue;
             }
             let rect = popup.geometry;
+            let left = f64::from(rect.x);
+            let top = f64::from(rect.y);
             if rect.width <= 0
                 || rect.height <= 0
-                || x < f64::from(rect.x)
-                || y < f64::from(rect.y)
-                || x >= f64::from(rect.x + rect.width)
-                || y >= f64::from(rect.y + rect.height)
+                || x < left
+                || y < top
+                || x >= left + f64::from(rect.width)
+                || y >= top + f64::from(rect.height)
             {
                 continue;
             }
-            let local_x = x - f64::from(rect.x);
-            let local_y = y - f64::from(rect.y);
-            return self
-                .hit_popup(popup.id, local_x, local_y)
-                .or(Some((popup.id, local_x, local_y)));
+            let local_x = x - left;
+            let local_y = y - top;
+            if let Some(hit) = self.hit_popup(popup.id, local_x, local_y) {
+                return Some(hit);
+            }
+            if self.surface_accepts_input(popup.surface_id, local_x, local_y) {
+                return Some((popup.id, local_x, local_y));
+            }
         }
         None
     }
@@ -486,32 +487,47 @@ impl Compositor {
             let Some(surface) = self.surfaces.get(child) else {
                 continue;
             };
-            let width = surface.logical_size.width as i32;
-            let height = surface.logical_size.height as i32;
-            if surface.committed.buffer.is_none() || width <= 0 || height <= 0 {
-                continue;
-            }
-            let left = surface.position.x;
-            let top = surface.position.y;
-            if x < f64::from(left)
-                || y < f64::from(top)
-                || x >= f64::from(left + width)
-                || y >= f64::from(top + height)
+            if surface.committed.buffer.is_none()
+                || surface.logical_size.width == 0
+                || surface.logical_size.height == 0
             {
                 continue;
             }
-            let local_x = x - f64::from(left);
-            let local_y = y - f64::from(top);
-            return self
-                .hit_subsurface(*child, local_x, local_y)
-                .or(Some((*child, local_x, local_y)));
+            let left = f64::from(surface.position.x);
+            let top = f64::from(surface.position.y);
+            if x < left
+                || y < top
+                || x >= left + f64::from(surface.logical_size.width)
+                || y >= top + f64::from(surface.logical_size.height)
+            {
+                continue;
+            }
+            let local_x = x - left;
+            let local_y = y - top;
+            return self.hit_subsurface(*child, local_x, local_y).or_else(|| {
+                self.surface_accepts_input(*child, local_x, local_y)
+                    .then_some((*child, local_x, local_y))
+            });
         }
         None
     }
 
+    fn surface_accepts_input(&self, surface: SurfaceId, x: f64, y: f64) -> bool {
+        self.surfaces.get(&surface).is_some_and(|surface| {
+            surface
+                .committed
+                .input_region
+                .as_ref()
+                .is_none_or(|region| region.contains(x, y))
+        })
+    }
+
     pub fn pointer_button(&mut self, button: u32, pressed: bool, time: u32) -> Result<()> {
-        if self.pointer_focus.is_none() {
+        let Some((focus_window, _, _, _)) = self.pointer_focus else {
             return Ok(());
+        };
+        if pressed {
+            self.dismiss_outside_popups(Some(focus_window));
         }
         let pointers = self
             .seats
@@ -532,6 +548,9 @@ impl Compositor {
                 ],
             );
             self.emit(&wl::WL_POINTER_INTERFACE, "frame", pointer, &[]);
+            if pressed {
+                self.record_input_serial(serial);
+            }
         }
         Ok(())
     }
@@ -609,7 +628,18 @@ impl Compositor {
     }
 
     pub fn key(&mut self, key: u32, pressed: bool, time: u32) -> Result<()> {
-        if self.keyboard_focus.is_none() || key < 8 {
+        if pressed && key == 1 {
+            self.dismiss_popup_grab();
+        }
+        if self.keyboard_focus.is_none() || key == 0 {
+            return Ok(());
+        }
+        let changed = if pressed {
+            self.pressed_keys.insert(key)
+        } else {
+            self.pressed_keys.remove(&key)
+        };
+        if !changed {
             return Ok(());
         }
         let keyboards = self
@@ -626,10 +656,13 @@ impl Compositor {
                 &[
                     Argument::Uint(serial),
                     Argument::Uint(time),
-                    Argument::Uint(key - 8),
+                    Argument::Uint(key),
                     Argument::Uint(u32::from(pressed)),
                 ],
             );
+            if pressed {
+                self.record_input_serial(serial);
+            }
             let changed = self.modifiers;
             self.modifiers.update(key, pressed);
             if changed.shift != self.modifiers.shift
@@ -643,6 +676,17 @@ impl Compositor {
         Ok(())
     }
 
+    pub fn popup_grab_active(&self) -> bool {
+        !self.popup_grab.is_empty()
+    }
+
+    fn record_input_serial(&mut self, serial: u32) {
+        if self.input_serials.len() == 32 {
+            self.input_serials.pop_front();
+        }
+        self.input_serials.push_back(serial);
+    }
+
     pub fn touch_down(
         &mut self,
         window_id: WindowId,
@@ -654,6 +698,12 @@ impl Compositor {
         let Some((surface, local_x, local_y)) = self.hit_surface(window_id, x, y) else {
             return Ok(());
         };
+        let focus_window = self
+            .surfaces
+            .get(&surface)
+            .and_then(|surface| surface.window_id)
+            .unwrap_or(window_id);
+        self.dismiss_outside_popups(Some(focus_window));
         self.touches.insert(id, (surface, x - local_x, y - local_y));
         let touches = self
             .seats
@@ -676,6 +726,7 @@ impl Compositor {
                 ],
             );
             self.emit(&wl::WL_TOUCH_INTERFACE, "frame", touch, &[]);
+            self.record_input_serial(serial);
         }
         Ok(())
     }

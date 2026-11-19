@@ -143,7 +143,7 @@ impl Compositor {
 
     pub(super) fn offer_source_mime(&mut self, request: &DecodedRequest) -> Result<()> {
         let mime = string(request, 0)?.to_owned();
-        if mime.len() > 1024 || mime.contains('\0') {
+        if mime.is_empty() || mime.len() > 1024 || mime.contains('\0') {
             return Err(bad(request, "invalid MIME type"));
         }
         let source = self
@@ -187,6 +187,22 @@ impl Compositor {
         Ok(())
     }
 
+    pub(super) fn accept_offer(&mut self, request: &DecodedRequest) -> Result<()> {
+        let Some(Value::Str(mime_type)) = request.args.get(1) else {
+            return Err(bad(request, "expected nullable MIME type string"));
+        };
+        let offer = self
+            .offers
+            .get(&request.object_id)
+            .ok_or_else(|| bad(request, "unknown wl_data_offer"))?;
+        if let Some(mime_type) = mime_type {
+            if !offer.mime_types().contains(mime_type) {
+                return Err(bad(request, "accepted MIME type was not offered"));
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn receive_offer(
         &mut self,
         client: &mut Client,
@@ -200,6 +216,9 @@ impl Compositor {
             .get(&offer_id)
             .cloned()
             .ok_or_else(|| bad(request, "unknown wl_data_offer"))?;
+        if !selection.mime_types().contains(&mime_type) {
+            return Err(bad(request, "requested MIME type was not offered"));
+        }
         if !is_text_mime(&mime_type) {
             return Err(bad(request, "only text clipboard transfers are supported"));
         }

@@ -64,6 +64,8 @@ def track_input(object_id, opcode):
         sock.sendall(message(24, 0, struct.pack("<IIii", serial, 0, 0, 0)))
     if object_id == 13 and opcode == 3:
         saw_key = True
+        _, _, key, state = struct.unpack("<IIII", payload)
+        assert (key, state) == (42, 1)
 
 
 def wait_done(callback_id):

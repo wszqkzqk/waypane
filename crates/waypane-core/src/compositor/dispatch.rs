@@ -138,7 +138,8 @@ impl Compositor {
                 self.surfaces.insert(id, Surface::default());
             }
             (ObjectKind::Compositor, "create_region") => {
-                self.create_new(request, 0)?;
+                let id = self.create_new(request, 0)?;
+                self.regions.insert(id, Region::default());
             }
             (ObjectKind::Subcompositor, "get_subsurface") => {
                 let id = self.create_new(request, 0)?;
@@ -203,6 +204,7 @@ impl Compositor {
             }
             (ObjectKind::Subsurface, "destroy") => {
                 let surface = self.subsurface_surface(request.object_id)?;
+                self.set_surface_mapped(surface, false);
                 if let Some(surface) = self.surfaces.get_mut(&surface) {
                     surface.role = Role::None;
                     surface.window_id = None;
@@ -213,7 +215,10 @@ impl Compositor {
                 }
             }
             (ObjectKind::Surface, "destroy") => {
-                if self.surfaces[&request.object_id].role != Role::None {
+                if !matches!(
+                    self.surfaces[&request.object_id].role,
+                    Role::None | Role::Cursor { .. }
+                ) {
                     return Err(bad(request, "surface role object must be destroyed first"));
                 }
             }
@@ -283,7 +288,23 @@ impl Compositor {
                     y: int(request, 1)?,
                 });
             }
-            (ObjectKind::Surface, "set_opaque_region" | "set_input_region") => {}
+            (ObjectKind::Surface, "set_opaque_region") => {}
+            (ObjectKind::Surface, "set_input_region") => {
+                let region = match optional_object_id(request, 0)? {
+                    Some(id) => Some(
+                        self.regions
+                            .get(&id)
+                            .ok_or_else(|| bad(request, "unknown wl_region"))?
+                            .clone(),
+                    ),
+                    None => None,
+                };
+                self.surfaces
+                    .get_mut(&request.object_id)
+                    .unwrap()
+                    .pending
+                    .input_region = Some(region);
+            }
             (ObjectKind::Shm, "create_pool") => {
                 let id = self.create_new(request, 0)?;
                 let rid = fd(request, 1)?;
@@ -348,6 +369,12 @@ impl Compositor {
                 let Some(entry) = self.surfaces.get(&surface) else {
                     return Err(bad(request, "unknown wl_surface"));
                 };
+                if entry.committed.buffer.is_some() || entry.pending.attach.is_some() {
+                    return Err(bad(
+                        request,
+                        "cannot create xdg_surface after attaching a buffer",
+                    ));
+                }
                 if entry.role != Role::None
                     || self
                         .xdg_surfaces
@@ -360,10 +387,7 @@ impl Compositor {
                     id,
                     XdgSurface {
                         surface_id: surface,
-                        window_id: None,
-                        geometry: None,
-                        configure_serial: None,
-                        initial_ack_seen: false,
+                        ..XdgSurface::default()
                     },
                 );
             }
@@ -424,15 +448,7 @@ impl Compositor {
                 }
             }
             (ObjectKind::XdgSurface, "ack_configure") => {
-                let serial = uint(request, 0)?;
-                let xdg_surface = self
-                    .xdg_surfaces
-                    .get_mut(&request.object_id)
-                    .ok_or_else(|| bad(request, "unknown xdg_surface"))?;
-                if xdg_surface.configure_serial != Some(serial) {
-                    return Err(bad(request, "ack_configure does not match latest serial"));
-                }
-                xdg_surface.initial_ack_seen = true;
+                self.ack_xdg_configure(request)?;
             }
             (ObjectKind::XdgSurface, "destroy") => {
                 if self.xdg_surfaces[&request.object_id].window_id.is_some() {
@@ -474,11 +490,7 @@ impl Compositor {
                     _ => unreachable!(),
                 };
                 if !states.is_empty() {
-                    let xdg_surface = self.windows[&request.object_id].xdg_surface_id;
-                    let serial = self.next_serial();
-                    let config = self.xdg_surfaces.get_mut(&xdg_surface).unwrap();
-                    config.configure_serial = Some(serial);
-                    self.send_configure(request.object_id, xdg_surface, None, &states, serial);
+                    self.configure_window(request.object_id, None, states)?;
                 }
                 self.events.push(CoreEvent::WindowRequest {
                     id: request.object_id,
@@ -498,37 +510,16 @@ impl Compositor {
                     request: request_kind,
                 });
             }
-            (
-                ObjectKind::XdgToplevel,
-                "set_parent" | "set_max_size" | "set_min_size" | "show_window_menu" | "destroy",
-            ) => {}
-            (ObjectKind::XdgPopup, "set_position" | "reposition" | "destroy") => {}
-            (ObjectKind::XdgPositioner, "set_size") => {
-                self.positioners.get_mut(&request.object_id).unwrap().size =
-                    Some((int(request, 0)?, int(request, 1)?));
+            (ObjectKind::XdgToplevel, "set_min_size" | "set_max_size") => {
+                self.configure_size_limits(request)?;
             }
-            (ObjectKind::XdgPositioner, "set_anchor_rect") => {
-                self.positioners
-                    .get_mut(&request.object_id)
-                    .unwrap()
-                    .anchor_rect = Some(rect(request, 0)?);
+            (ObjectKind::XdgToplevel, "set_parent" | "show_window_menu" | "destroy") => {}
+            (ObjectKind::XdgPopup, "reposition") => {
+                self.reposition_popup(request)?;
             }
-            (ObjectKind::XdgPositioner, "set_offset") => {
-                self.positioners.get_mut(&request.object_id).unwrap().offset = Point {
-                    x: int(request, 0)?,
-                    y: int(request, 1)?,
-                };
-            }
-            (
-                ObjectKind::XdgPositioner,
-                "destroy"
-                | "set_anchor"
-                | "set_gravity"
-                | "set_constraint_adjustment"
-                | "set_reactive"
-                | "set_parent_size"
-                | "set_parent_configure",
-            ) => {}
+            (ObjectKind::XdgPopup, "grab") => self.grab_popup(request)?,
+            (ObjectKind::XdgPositioner, "destroy") => {}
+            (ObjectKind::XdgPositioner, _) => self.update_positioner(request)?,
             (ObjectKind::Seat, "get_pointer") => {
                 let id = self.create_new(request, 0)?;
                 self.seats
@@ -594,7 +585,19 @@ impl Compositor {
                     .push(id);
             }
             (ObjectKind::Seat, "release") => {}
-            (ObjectKind::Region, "add" | "subtract" | "destroy") => {}
+            (ObjectKind::Region, "add" | "subtract") => {
+                let rectangle = rect(request, 0)?;
+                let region = self
+                    .regions
+                    .get_mut(&request.object_id)
+                    .ok_or_else(|| bad(request, "unknown wl_region"))?;
+                let result = if request.method.name == "add" {
+                    region.add(rectangle)
+                } else {
+                    region.subtract(rectangle)
+                };
+                result.map_err(|_| bad(request, "invalid or too complex wl_region"))?;
+            }
             (ObjectKind::Output, "release") => {}
             (ObjectKind::DataDeviceManager, "create_data_source") => {
                 self.create_data_source(request)?;
@@ -606,6 +609,7 @@ impl Compositor {
             (ObjectKind::DataSource, "set_actions" | "destroy") => {}
             (ObjectKind::DataDevice, "set_selection") => self.set_remote_selection(request)?,
             (ObjectKind::DataDevice, "start_drag" | "release") => {}
+            (ObjectKind::DataOffer, "accept") => self.accept_offer(request)?,
             (ObjectKind::DataOffer, "receive") => self.receive_offer(client, request)?,
             (ObjectKind::DataOffer, "set_actions" | "finish" | "destroy") => {}
             (ObjectKind::TextInputManager, "get_text_input") => {
@@ -720,6 +724,15 @@ impl Compositor {
                 if version >= 2 {
                     self.emit(&wl::WL_OUTPUT_INTERFACE, "done", id, &[]);
                 }
+                let mapped_surfaces = self
+                    .surfaces
+                    .iter()
+                    .filter(|(_, surface)| surface.mapped)
+                    .map(|(surface_id, _)| *surface_id)
+                    .collect::<Vec<_>>();
+                for surface_id in mapped_surfaces {
+                    self.set_surface_mapped(surface_id, true);
+                }
             }
             _ => {}
         }
@@ -759,85 +772,6 @@ impl Compositor {
         }
         pool.buffer_refs += 1;
         self.buffers.insert(id, buffer);
-        Ok(())
-    }
-
-    fn create_popup(&mut self, request: &DecodedRequest) -> Result<()> {
-        let id = self.create_new(request, 0)?;
-        let parent_xdg = object_id(request, 1)?;
-        let positioner = object_id(request, 2)?;
-        let parent = self
-            .xdg_surfaces
-            .get(&parent_xdg)
-            .and_then(|surface| surface.window_id)
-            .ok_or_else(|| bad(request, "popup parent has no role"))?;
-        let positioner = *self
-            .positioners
-            .get(&positioner)
-            .ok_or_else(|| bad(request, "unknown xdg_positioner"))?;
-        let (width, height) = positioner
-            .size
-            .ok_or_else(|| bad(request, "positioner size is not set"))?;
-        if width <= 0 || height <= 0 {
-            return Err(bad(request, "invalid positioner size"));
-        }
-        let anchor = positioner.anchor_rect.unwrap_or_default();
-        let geometry = Rect {
-            x: anchor.x + positioner.offset.x,
-            y: anchor.y + positioner.offset.y,
-            width,
-            height,
-        };
-        let surface_id = self.xdg_surfaces[&request.object_id].surface_id;
-        {
-            let surface = self.surfaces.get_mut(&surface_id).unwrap();
-            surface.role = Role::Popup(id);
-            surface.window_id = Some(id);
-        }
-        self.xdg_surfaces
-            .get_mut(&request.object_id)
-            .unwrap()
-            .window_id = Some(id);
-        self.xdg_surfaces
-            .get_mut(&request.object_id)
-            .unwrap()
-            .geometry = Some(geometry);
-        self.windows.insert(
-            id,
-            Window {
-                id,
-                xdg_surface_id: request.object_id,
-                surface_id,
-                kind: WindowKind::Popup { parent },
-                title: String::new(),
-                app_id: String::new(),
-                geometry,
-            },
-        );
-        self.emit(
-            &xdg::XDG_POPUP_INTERFACE,
-            "configure",
-            id,
-            &[
-                Argument::Int(geometry.x),
-                Argument::Int(geometry.y),
-                Argument::Int(width),
-                Argument::Int(height),
-            ],
-        );
-        let serial = self.next_serial();
-        self.xdg_surfaces
-            .get_mut(&request.object_id)
-            .unwrap()
-            .configure_serial = Some(serial);
-        self.emit(
-            &xdg::XDG_SURFACE_INTERFACE,
-            "configure",
-            request.object_id,
-            &[Argument::Uint(serial)],
-        );
-        let info = self.window_info(id).unwrap();
-        self.events.push(CoreEvent::WindowCreated(info));
         Ok(())
     }
 
@@ -891,6 +825,9 @@ impl Compositor {
             if let Some(transform) = surface.pending.transform.take() {
                 surface.committed.transform = transform;
             }
+            if let Some(input_region) = surface.pending.input_region.take() {
+                surface.committed.input_region = input_region;
+            }
             if let Some(position) = surface.pending.position.take() {
                 surface.position = position;
             }
@@ -918,7 +855,9 @@ impl Compositor {
             Role::Subsurface { parent, .. } => Some((parent, position)),
             _ => None,
         };
-        let z_order = self.subsurface_z_order(window_id, &role);
+        let z_order = self.subsurface_z_order(window_id, &role).filter(|order| {
+            self.published_z_orders.get(&window_id.unwrap_or_default()) != Some(order)
+        });
         if attach == Some(None) {
             if let Some(surface) = self.surfaces.get_mut(&surface_id) {
                 surface.logical_size = Size::default();
@@ -936,6 +875,21 @@ impl Compositor {
                 };
             }
         }
+
+        let mapped = buffer.is_some()
+            && match role {
+                Role::Cursor { pointer } => {
+                    self.pointer_window.is_some()
+                        && self
+                            .pointers
+                            .get(&pointer)
+                            .and_then(|state| state.cursor)
+                            .is_some_and(|cursor| cursor.surface == surface_id)
+                }
+                Role::None => false,
+                _ => true,
+            };
+        self.set_surface_mapped(surface_id, mapped);
 
         if let Role::Cursor { pointer } = role {
             if let Some(cursor) = self
@@ -957,7 +911,8 @@ impl Compositor {
         }
 
         if let Some(window_id) = window_id {
-            if buffer.is_some() || attach == Some(None) || !callbacks.is_empty() {
+            if attach.is_some() || !damage.is_empty() || !callbacks.is_empty() || z_order.is_some()
+            {
                 let id = self.next_frame_id;
                 self.next_frame_id += 1;
                 self.pending_frames.insert(
@@ -968,6 +923,9 @@ impl Compositor {
                         callbacks,
                     },
                 );
+                if let Some(order) = &z_order {
+                    self.published_z_orders.insert(window_id, order.clone());
+                }
                 self.events.push(CoreEvent::Frame(Frame {
                     id,
                     window_id,
@@ -1162,12 +1120,21 @@ impl Compositor {
         {
             return Ok(());
         }
+        let previous = self.pointers[&pointer].cursor.map(|cursor| cursor.surface);
+        if previous != surface {
+            if let Some(previous) = previous {
+                self.set_surface_mapped(previous, false);
+            }
+        }
         if let Some(surface) = surface {
             self.surfaces.get_mut(&surface).unwrap().role = Role::Cursor { pointer };
         }
         self.pointers.get_mut(&pointer).unwrap().cursor =
             surface.map(|surface| CursorState { surface, hotspot });
         self.active_pointer = Some(pointer);
+        if let Some(surface) = surface {
+            self.set_surface_mapped(surface, self.pointer_window.is_some());
+        }
 
         let existing = surface.and_then(|surface| {
             let surface = &self.surfaces[&surface];
@@ -1295,6 +1262,51 @@ impl Compositor {
         Ok(())
     }
 
+    pub(super) fn set_surface_mapped(&mut self, surface_id: u32, mapped: bool) {
+        if !mapped {
+            let Some(surface) = self.surfaces.get_mut(&surface_id) else {
+                return;
+            };
+            if !surface.mapped && surface.outputs.is_empty() {
+                return;
+            }
+            surface.mapped = false;
+            let outputs = std::mem::take(&mut surface.outputs);
+            for output in outputs {
+                if self.objects.contains_key(&output) {
+                    self.emit(
+                        &wl::WL_SURFACE_INTERFACE,
+                        "leave",
+                        surface_id,
+                        &[Argument::Object(output)],
+                    );
+                }
+            }
+            return;
+        }
+
+        let outputs = self.outputs.clone();
+        let Some(surface) = self.surfaces.get_mut(&surface_id) else {
+            return;
+        };
+        surface.mapped = true;
+        let additions = outputs
+            .into_iter()
+            .filter(|output| !surface.outputs.contains(output))
+            .collect::<Vec<_>>();
+        surface.outputs.extend(additions.iter().copied());
+        for output in additions {
+            if self.objects.contains_key(&output) {
+                self.emit(
+                    &wl::WL_SURFACE_INTERFACE,
+                    "enter",
+                    surface_id,
+                    &[Argument::Object(output)],
+                );
+            }
+        }
+    }
+
     pub(super) fn finish_destructor(
         &mut self,
         client: &mut Client,
@@ -1303,6 +1315,7 @@ impl Compositor {
     ) -> Result<()> {
         match kind {
             ObjectKind::Surface => {
+                self.set_surface_mapped(id, false);
                 let hid_cursor = self.pointers.values_mut().fold(false, |hidden, state| {
                     if state.cursor.is_some_and(|cursor| cursor.surface == id) {
                         state.cursor = None;
@@ -1332,27 +1345,98 @@ impl Compositor {
             ObjectKind::Buffer => {
                 self.retire_orphan_buffers(client);
             }
+            ObjectKind::Region => {
+                self.regions.remove(&id);
+            }
             ObjectKind::XdgSurface => {
                 self.xdg_surfaces.remove(&id);
             }
             ObjectKind::XdgToplevel | ObjectKind::XdgPopup => {
-                if let Some(window) = self.windows.remove(&id) {
-                    if let Some(xdg) = self.xdg_surfaces.get_mut(&window.xdg_surface_id) {
-                        xdg.window_id = None;
-                    }
-                    if let Some(surface) = self.surfaces.get_mut(&window.surface_id) {
-                        surface.window_id = None;
-                        surface.role = Role::None;
-                        surface.committed.buffer = None;
-                    }
-                    if self.keyboard_focus == Some(id) {
-                        self.keyboard_focus = None;
-                    }
-                    if self.pointer_focus.map(|focus| focus.0) == Some(id) {
-                        self.pointer_focus = None;
-                    }
-                    self.events.push(CoreEvent::WindowClosed { id });
+                let Some(window) = self.windows.get(&id) else {
+                    return Ok(());
+                };
+                let (xdg_surface_id, root_surface) = (window.xdg_surface_id, window.surface_id);
+                let descendants = self
+                    .windows
+                    .keys()
+                    .filter(|candidate| {
+                        **candidate != id && self.popup_descendant_or_self(**candidate, id)
+                    })
+                    .copied()
+                    .collect::<Vec<_>>();
+                let attached_surfaces = self
+                    .surfaces
+                    .iter()
+                    .filter(|(_, surface)| surface.window_id == Some(id))
+                    .map(|(surface_id, _)| *surface_id)
+                    .collect::<Vec<_>>();
+                self.windows.remove(&id);
+                self.popup_positioners.remove(&id);
+                self.published_z_orders.remove(&id);
+                self.popup_grab
+                    .retain(|popup| *popup != id && !descendants.contains(popup));
+                for popup in descendants.iter().rev() {
+                    self.emit(&xdg::XDG_POPUP_INTERFACE, "popup_done", *popup, &[]);
                 }
+                if let Some(xdg) = self.xdg_surfaces.get_mut(&xdg_surface_id) {
+                    xdg.window_id = None;
+                }
+                for surface_id in &attached_surfaces {
+                    self.set_surface_mapped(*surface_id, false);
+                    if let Some(surface) = self.surfaces.get_mut(surface_id) {
+                        surface.window_id = None;
+                        if *surface_id == root_surface {
+                            surface.role = Role::None;
+                            surface.committed.buffer = None;
+                        }
+                    }
+                }
+                if self
+                    .touches
+                    .values()
+                    .any(|(surface, _, _)| attached_surfaces.contains(surface))
+                {
+                    self.touch_cancel();
+                    self.touches.clear();
+                }
+                let lost_keyboard_focus = self
+                    .keyboard_focus
+                    .is_some_and(|window| window == id || descendants.contains(&window));
+                if lost_keyboard_focus {
+                    self.keyboard_focus = None;
+                    self.pressed_keys.clear();
+                    self.modifiers = Modifiers::default();
+                }
+                let lost_pointer_focus = self
+                    .pointer_focus
+                    .is_some_and(|(window, _, _, _)| window == id || descendants.contains(&window));
+                if lost_pointer_focus {
+                    self.pointer_focus = None;
+                    self.pointer_window = None;
+                }
+                let mut hid_cursor = false;
+                let cursors = self
+                    .pointers
+                    .values_mut()
+                    .filter_map(|state| {
+                        if lost_pointer_focus {
+                            state.focus = None;
+                            hid_cursor |= state.cursor.take().is_some();
+                        }
+                        state.cursor
+                    })
+                    .collect::<Vec<_>>();
+                for cursor in cursors {
+                    self.set_surface_mapped(cursor.surface, false);
+                }
+                if hid_cursor {
+                    self.events.push(CoreEvent::CursorChanged {
+                        window_id: None,
+                        buffer: None,
+                        hotspot: Point::default(),
+                    });
+                }
+                self.events.push(CoreEvent::WindowClosed { id });
             }
             ObjectKind::XdgPositioner => {
                 self.positioners.remove(&id);
@@ -1363,6 +1447,26 @@ impl Compositor {
             ObjectKind::Keyboard => {
                 for seat in self.seats.values_mut() {
                     seat.keyboards.retain(|keyboard| *keyboard != id);
+                }
+            }
+            ObjectKind::Output => {
+                self.outputs.retain(|output| *output != id);
+                let surfaces = self
+                    .surfaces
+                    .iter()
+                    .filter(|(_, surface)| surface.outputs.contains(&id))
+                    .map(|(surface, _)| *surface)
+                    .collect::<Vec<_>>();
+                for surface_id in surfaces {
+                    if let Some(surface) = self.surfaces.get_mut(&surface_id) {
+                        surface.outputs.retain(|output| *output != id);
+                    }
+                    self.emit(
+                        &wl::WL_SURFACE_INTERFACE,
+                        "leave",
+                        surface_id,
+                        &[Argument::Object(id)],
+                    );
                 }
             }
             ObjectKind::Pointer => {

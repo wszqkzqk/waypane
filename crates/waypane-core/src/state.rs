@@ -90,12 +90,150 @@ pub(crate) fn global_interface(name: &str, version: u32) -> Option<ObjectRecord>
     interface_by_name(name).map(|interface| ObjectRecord::new(interface, version))
 }
 
+const MAX_REGION_RECTS: usize = 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RegionRect {
+    left: i64,
+    top: i64,
+    right: i64,
+    bottom: i64,
+}
+
+impl RegionRect {
+    fn empty(rect: Rect) -> Result<Option<Self>, ()> {
+        if rect.width < 0 || rect.height < 0 {
+            return Err(());
+        }
+        let left = i64::from(rect.x);
+        let top = i64::from(rect.y);
+        let rect = Self {
+            left,
+            top,
+            right: left + i64::from(rect.width),
+            bottom: top + i64::from(rect.height),
+        };
+        Ok((rect.left < rect.right && rect.top < rect.bottom).then_some(rect))
+    }
+
+    fn contains(self, other: Self) -> bool {
+        self.left <= other.left
+            && self.top <= other.top
+            && self.right >= other.right
+            && self.bottom >= other.bottom
+    }
+
+    fn contains_point(self, x: f64, y: f64) -> bool {
+        x >= self.left as f64
+            && x < self.right as f64
+            && y >= self.top as f64
+            && y < self.bottom as f64
+    }
+
+    fn difference(self, cut: Self) -> Vec<Self> {
+        let left = self.left.max(cut.left);
+        let top = self.top.max(cut.top);
+        let right = self.right.min(cut.right);
+        let bottom = self.bottom.min(cut.bottom);
+        if left >= right || top >= bottom {
+            return vec![self];
+        }
+        let mut parts = Vec::with_capacity(4);
+        let middle = Self {
+            left: self.left,
+            top,
+            right: self.right,
+            bottom,
+        };
+        if self.top < top {
+            parts.push(Self {
+                top: self.top,
+                bottom: top,
+                ..middle
+            });
+        }
+        if self.left < left {
+            parts.push(Self {
+                right: left,
+                ..middle
+            });
+        }
+        if right < self.right {
+            parts.push(Self {
+                left: right,
+                ..middle
+            });
+        }
+        if bottom < self.bottom {
+            parts.push(Self {
+                top: bottom,
+                bottom: self.bottom,
+                ..middle
+            });
+        }
+        parts
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Region {
+    rects: Vec<RegionRect>,
+}
+
+impl Region {
+    pub fn add(&mut self, rect: Rect) -> Result<(), ()> {
+        let Some(added) = RegionRect::empty(rect)? else {
+            return Ok(());
+        };
+        let mut rects = self.rects.clone();
+        rects.retain(|existing| !added.contains(*existing));
+        let mut fragments = vec![added];
+        for existing in &rects {
+            fragments = fragments
+                .into_iter()
+                .flat_map(|fragment| fragment.difference(*existing))
+                .collect::<Vec<_>>();
+            if fragments.is_empty() {
+                break;
+            }
+            if rects.len() + fragments.len() > MAX_REGION_RECTS {
+                return Err(());
+            }
+        }
+        rects.extend(fragments);
+        self.rects = rects;
+        Ok(())
+    }
+
+    pub fn subtract(&mut self, rect: Rect) -> Result<(), ()> {
+        let Some(cut) = RegionRect::empty(rect)? else {
+            return Ok(());
+        };
+        let mut rects = Vec::new();
+        for existing in &self.rects {
+            for fragment in existing.difference(cut) {
+                if rects.len() == MAX_REGION_RECTS {
+                    return Err(());
+                }
+                rects.push(fragment);
+            }
+        }
+        self.rects = rects;
+        Ok(())
+    }
+
+    pub fn contains(&self, x: f64, y: f64) -> bool {
+        self.rects.iter().any(|rect| rect.contains_point(x, y))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct SurfaceCommit {
     pub buffer: Option<u32>,
     pub offset: Point,
     pub scale: i32,
     pub transform: u32,
+    pub input_region: Option<Region>,
 }
 
 impl Default for SurfaceCommit {
@@ -105,6 +243,7 @@ impl Default for SurfaceCommit {
             offset: Point::default(),
             scale: 1,
             transform: 0,
+            input_region: None,
         }
     }
 }
@@ -115,6 +254,7 @@ pub(crate) struct PendingSurface {
     pub offset: Option<Point>,
     pub scale: Option<i32>,
     pub transform: Option<u32>,
+    pub input_region: Option<Option<Region>>,
     pub damage: Vec<(Rect, bool)>,
     pub callbacks: Vec<u32>,
     pub position: Option<Point>,
@@ -143,6 +283,8 @@ pub(crate) struct Surface {
     pub window_id: Option<WindowId>,
     pub position: Point,
     pub logical_size: crate::types::Size,
+    pub mapped: bool,
+    pub outputs: Vec<u32>,
 }
 
 #[derive(Debug, Default)]
@@ -251,13 +393,17 @@ impl Buffer {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct XdgSurface {
     pub surface_id: u32,
     pub window_id: Option<WindowId>,
-    pub geometry: Option<Rect>,
+    pub pending_geometry: Option<Rect>,
     pub configure_serial: Option<u32>,
     pub initial_ack_seen: bool,
+    pub configured_size: Option<crate::types::Size>,
+    pub configured_states: Vec<u32>,
+    pub min_size: crate::types::Size,
+    pub max_size: crate::types::Size,
 }
 
 #[derive(Debug)]
@@ -275,7 +421,13 @@ pub(crate) struct Window {
 pub(crate) struct Positioner {
     pub size: Option<(i32, i32)>,
     pub anchor_rect: Option<Rect>,
+    pub anchor: u32,
+    pub gravity: u32,
+    pub constraint_adjustment: u32,
     pub offset: Point,
+    pub reactive: bool,
+    pub parent_size: Option<(i32, i32)>,
+    pub parent_serial: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy)]

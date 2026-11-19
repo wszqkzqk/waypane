@@ -91,6 +91,7 @@ def wait_selection():
 
 
 def read_clipboard(offer_id):
+    sock.sendall(message(offer_id, 0, struct.pack("<I", 1) + pack_string(TEXT_MIME)))
     read_fd, write_fd = os.pipe()
     rights = array.array("i", [write_fd])
     sock.sendmsg(
@@ -149,6 +150,7 @@ offer = wait_selection()
 assert read_clipboard(offer) == REMOTE_TEXT
 
 offer = wait_selection()
+sock.sendall(message(offer, 0, struct.pack("<I", 2) + pack_string(TEXT_MIME)))
 read_fd, write_fd = os.pipe()
 rights = array.array("i", [write_fd])
 sock.sendmsg(

@@ -468,10 +468,12 @@ impl AndroidEngine {
             .ok_or(EngineError::UnknownSession(key.session))?;
         connection
             .compositor_mut()
-            .keyboard_focus(Some(key.window))?;
-        connection
-            .compositor_mut()
             .touch_down(key.window, id, x, y, time)?;
+        if !connection.compositor().popup_grab_active() {
+            connection
+                .compositor_mut()
+                .keyboard_focus(Some(key.window))?;
+        }
         self.set_touch_active(key, true)?;
         self.flush(key.session)
     }
@@ -628,15 +630,17 @@ impl AndroidEngine {
                 .compositor_mut()
                 .pointer_motion(key.window, x, y, time)?;
         }
-        if let Some((_, true)) = button {
-            connection
-                .compositor_mut()
-                .keyboard_focus(Some(key.window))?;
-        }
         if let Some((button, pressed)) = button {
             connection
                 .compositor_mut()
                 .pointer_button(button, pressed, time)?;
+        }
+        if let Some((_, true)) = button {
+            if !connection.compositor().popup_grab_active() {
+                connection
+                    .compositor_mut()
+                    .keyboard_focus(Some(key.window))?;
+            }
         }
         self.sync_cursors(key.session);
         self.flush(key.session)
