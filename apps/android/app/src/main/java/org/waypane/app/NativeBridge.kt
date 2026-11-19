@@ -18,6 +18,7 @@ object NativeBridge {
         remoteSocket: String,
         compression: String,
         command: String,
+        waylandScale: Int,
     ): Long
 
     external fun nativeResolveHostKey(handle: Long, trusted: Boolean): Boolean
@@ -34,6 +35,7 @@ object NativeBridge {
 
     external fun nativeResizeSurface(handle: Long, session: Long, window: Int, width: Int, height: Int)
     external fun nativeSetViewport(handle: Long, session: Long, window: Int, zoom: Float, panX: Float, panY: Float)
+    external fun nativeSetOutputScale(handle: Long, scale: Int): Boolean
     external fun nativeRender(handle: Long, session: Long, window: Int): Int
     external fun nativeDetachSurface(handle: Long, session: Long, window: Int)
     external fun nativeIsDirty(handle: Long, session: Long, window: Int): Boolean

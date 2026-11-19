@@ -36,6 +36,7 @@ pub enum ActorCommand {
     CloseWindow(SurfaceKey),
     DisconnectSession(SessionId),
     Resize(SurfaceKey, Size),
+    SetOutputScale(i32),
     SetClipboard(String),
     CommitText(SurfaceKey, String),
     SetPreedit(SurfaceKey, Option<String>, i32, i32),
@@ -52,9 +53,12 @@ pub struct ActorHandle {
 }
 
 impl ActorHandle {
-    pub fn start(mut config: SshConfig, remote: RemoteWaypipe) -> Self {
+    pub fn start(mut config: SshConfig, remote: RemoteWaypipe, output_scale: i32) -> Self {
         let compression = remote.compression;
-        let engine = Arc::new(Mutex::new(AndroidEngine::new(compression)));
+        let engine = Arc::new(Mutex::new(AndroidEngine::with_output_scale(
+            compression,
+            output_scale,
+        )));
         let (commands, command_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (host_keys, host_key_prompts) = HostKeyChannel::new();
@@ -255,6 +259,7 @@ async fn run_actor(
                     ActorCommand::Pointer(key, x, y, button) => (key.session, lock(&engine).pointer(key, x, y, button)),
                     ActorCommand::CloseWindow(key) => (key.session, lock(&engine).close_window(key)),
                     ActorCommand::Resize(key, size) => (key.session, lock(&engine).resize(key, size)),
+                    ActorCommand::SetOutputScale(scale) => (0, lock(&engine).set_output_scale(scale)),
                     ActorCommand::SetClipboard(text) => (0, lock(&engine).set_clipboard_text(&text)),
                     ActorCommand::CommitText(key, text) => (key.session, lock(&engine).commit_text(key, &text)),
                     ActorCommand::SetPreedit(key, text, begin, end) => {

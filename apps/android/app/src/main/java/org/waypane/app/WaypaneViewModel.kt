@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.ClipData
 import android.content.ClipDescription
 import android.content.ClipboardManager
+import android.content.Context
 import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -20,9 +21,23 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.ceil
 
 private const val MAX_PRIVATE_KEY_BYTES = 64 * 1024
 private const val LOG_TAG = "Waypane"
+
+const val WAYLAND_SCALE_AUTO = 0
+internal val WAYLAND_SCALE_CHOICES = listOf(WAYLAND_SCALE_AUTO, 1, 2, 3, 4)
+
+internal fun defaultWaylandScale(density: Float): Int {
+    if (!density.isFinite() || density <= 0f) return 1
+    return ceil(density.toDouble() / 2.0).toInt().coerceIn(1, 4)
+}
+
+internal fun Context.defaultWaylandScale(): Int = defaultWaylandScale(resources.displayMetrics.density)
+
+internal fun Context.resolveWaylandScale(option: Int): Int =
+    if (option == WAYLAND_SCALE_AUTO) defaultWaylandScale() else option
 
 internal fun restrictToOwner(file: File) {
     if (!file.setReadable(false, false) ||
@@ -52,6 +67,7 @@ data class ConnectionProfile(
     val compression: String = "lz4",
     val command: String = "foot",
     val autoResize: Boolean = false,
+    val waylandScale: Int = WAYLAND_SCALE_AUTO,
 )
 
 data class UiState(
@@ -65,6 +81,7 @@ data class UiState(
     val immersive: Boolean = false,
     val autoResize: Boolean = false,
     val directTouch: Boolean = false,
+    val waylandScale: Int = WAYLAND_SCALE_AUTO,
 )
 
 class WaypaneViewModel(application: Application) : AndroidViewModel(application) {
@@ -165,6 +182,8 @@ class WaypaneViewModel(application: Application) : AndroidViewModel(application)
                 remoteSocket = profile.remoteSocket.trim(),
                 compression = profile.compression,
                 command = profile.command.trim(),
+                waylandScale = getApplication<Application>()
+                    .resolveWaylandScale(profile.waylandScale),
             )
         } catch (error: RuntimeException) {
             reportError(error.message ?: error.toString())
@@ -191,6 +210,7 @@ class WaypaneViewModel(application: Application) : AndroidViewModel(application)
             autoResize = profile.autoResize,
             immersive = false,
             directTouch = false,
+            waylandScale = profile.waylandScale,
         )
         appendLog("Connecting to ${profile.host}:${profile.port}")
         viewModelScope.launch { consumeEvents(freshHandle) }
@@ -324,6 +344,29 @@ class WaypaneViewModel(application: Application) : AndroidViewModel(application)
 
     fun setDirectTouch(enabled: Boolean) {
         uiState = uiState.copy(directTouch = enabled)
+    }
+
+    fun selectWaylandScale(option: Int) {
+        if (option !in WAYLAND_SCALE_CHOICES) {
+            reportError("Invalid Wayland scale $option; expected Auto or 1x–4x")
+            return
+        }
+        uiState = uiState.copy(waylandScale = option)
+    }
+
+    fun applyWaylandScale(scale: Int) {
+        val active = handle.get()
+        if (active == 0L) return
+        val error = runCatching {
+            if (NativeBridge.nativeSetOutputScale(active, scale)) {
+                null
+            } else {
+                "native command queue is closed or full"
+            }
+        }.getOrElse { it.message ?: it.toString() }
+        if (error != null) {
+            reportError("Failed to set Wayland scale to ${scale}x: $error")
+        }
     }
 
     fun toggleImmersive() {

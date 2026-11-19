@@ -53,6 +53,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
@@ -145,6 +146,47 @@ private fun SettingSwitch(
 }
 
 @Composable
+private fun WaylandScaleSelector(
+    selected: Int,
+    onSelected: (Int) -> Unit,
+    showDescription: Boolean = false,
+) {
+    val context = LocalContext.current
+    val configuration = LocalConfiguration.current
+    val automatic = remember(context, configuration) { context.defaultWaylandScale() }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("Wayland display scale")
+        LazyRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            items(WAYLAND_SCALE_CHOICES, key = { it }) { option ->
+                FilterChip(
+                    selected = selected == option,
+                    onClick = { onSelected(option) },
+                    label = {
+                        Text(
+                            if (option == WAYLAND_SCALE_AUTO) {
+                                "Auto (${automatic}x)"
+                            } else {
+                                "${option}x"
+                            },
+                        )
+                    },
+                )
+            }
+        }
+        if (showDescription) {
+            Text(
+                "Auto uses ceil(display density / 2): ${automatic}x on this screen. Native scale enlarges remote text and controls; pinch zoom and Fit only change presentation.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
 private fun SetupScreen(model: WaypaneViewModel) {
     val context = LocalContext.current
     var host by rememberSaveable { mutableStateOf("127.0.0.1") }
@@ -155,6 +197,7 @@ private fun SetupScreen(model: WaypaneViewModel) {
     var identity by rememberSaveable { mutableStateOf(model.importedKeyPath()) }
     var remoteSocket by rememberSaveable { mutableStateOf("") }
     var autoResize by rememberSaveable { mutableStateOf(false) }
+    var waylandScale by rememberSaveable { mutableStateOf(WAYLAND_SCALE_AUTO) }
     var authentication by rememberSaveable {
         mutableStateOf(if (identity.isBlank()) AuthenticationMode.Password else AuthenticationMode.PrivateKey)
     }
@@ -203,6 +246,7 @@ private fun SetupScreen(model: WaypaneViewModel) {
                 compression = compression,
                 command = command,
                 autoResize = autoResize,
+                waylandScale = waylandScale,
             ),
         )
         passphrase = ""
@@ -344,6 +388,11 @@ private fun SetupScreen(model: WaypaneViewModel) {
             checked = autoResize,
             onCheckedChange = { autoResize = it },
         )
+        WaylandScaleSelector(
+            selected = waylandScale,
+            onSelected = { waylandScale = it },
+            showDescription = true,
+        )
         OutlinedTextField(
             remoteSocket,
             { remoteSocket = it },
@@ -429,11 +478,19 @@ private fun HostKeyDialog(
 @Composable
 private fun SessionScreen(model: WaypaneViewModel, state: UiState) {
     val density = LocalDensity.current.density
+    val context = LocalContext.current
+    val configuration = LocalConfiguration.current
     val selected = state.selected
     val selectedWindow = selected?.let(model.windows::get)
+    val nativeScale = remember(state.waylandScale, configuration, context) {
+        context.resolveWaylandScale(state.waylandScale)
+    }
     var showWindowMenu by remember(selected) { mutableStateOf(false) }
     var surfaceView by remember(selected) { mutableStateOf<RemoteSurfaceView?>(null) }
 
+    LaunchedEffect(nativeScale) {
+        model.applyWaylandScale(nativeScale)
+    }
     Scaffold(
         topBar = {
             if (!state.immersive) {
@@ -502,7 +559,7 @@ private fun SessionScreen(model: WaypaneViewModel, state: UiState) {
                         )
                     }
                     if (state.autoResize) {
-                        LaunchedEffect(selected, maxWidth, maxHeight) {
+                        LaunchedEffect(selected, maxWidth, maxHeight, nativeScale) {
                             delay(250)
                             model.resizeWindow(
                                 selected,
@@ -568,9 +625,11 @@ private fun SessionScreen(model: WaypaneViewModel, state: UiState) {
         WindowOptionsDialog(
             autoResize = state.autoResize,
             directTouch = state.directTouch,
+            waylandScale = state.waylandScale,
             immersive = state.immersive,
             onAutoResizeChange = model::setAutoResize,
             onDirectTouchChange = model::setDirectTouch,
+            onWaylandScaleChange = model::selectWaylandScale,
             onFit = { surfaceView?.resetViewport() },
             onShowKeyboard = { surfaceView?.showKeyboard() },
             onToggleImmersive = model::toggleImmersive,
@@ -584,9 +643,11 @@ private fun SessionScreen(model: WaypaneViewModel, state: UiState) {
 private fun WindowOptionsDialog(
     autoResize: Boolean,
     directTouch: Boolean,
+    waylandScale: Int,
     immersive: Boolean,
     onAutoResizeChange: (Boolean) -> Unit,
     onDirectTouchChange: (Boolean) -> Unit,
+    onWaylandScaleChange: (Int) -> Unit,
     onFit: () -> Unit,
     onShowKeyboard: () -> Unit,
     onToggleImmersive: () -> Unit,
@@ -612,6 +673,10 @@ private fun WindowOptionsDialog(
                     description = "Send native Wayland touch events instead of pointer clicks. Leave off for most desktop applications.",
                     checked = directTouch,
                     onCheckedChange = onDirectTouchChange,
+                )
+                WaylandScaleSelector(
+                    selected = waylandScale,
+                    onSelected = onWaylandScaleChange,
                 )
                 TextButton(
                     onClick = {

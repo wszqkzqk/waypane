@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
-use waypane_core::{Connection, CoreEvent, Frame, Point, Size, WindowId, WindowKind};
+use waypane_core::{
+    Connection, CoreEvent, Frame, Point, Size, WindowId, WindowKind, MAX_WAYLAND_SCALE,
+};
 use waypane_render::{
     decode_buffer, Canvas, DecodedBuffer, ImageError, Viewport, ViewportTransform,
 };
@@ -225,8 +227,18 @@ pub enum EngineError {
     UnknownSession(SessionId),
     #[error("unknown Android surface {0:?}")]
     UnknownSurface(SurfaceKey),
+    #[error("invalid Wayland buffer scale {0}; expected 1..={MAX_WAYLAND_SCALE}")]
+    InvalidScale(i32),
     #[error("text input rejected: {0}")]
     TextInput(String),
+}
+
+fn logical_view_size(view: Size, scale: i32) -> Size {
+    let scale = u32::try_from(scale).unwrap_or(1);
+    Size {
+        width: view.width.div_ceil(scale).max(1),
+        height: view.height.div_ceil(scale).max(1),
+    }
 }
 
 struct PopupInfo {
@@ -242,11 +254,16 @@ pub struct AndroidEngine {
     popups: HashMap<SurfaceKey, PopupInfo>,
     cursor_image: Option<(WindowId, DecodedBuffer)>,
     host_clipboard: Option<String>,
+    output_scale: i32,
     clock: Instant,
 }
 
 impl AndroidEngine {
     pub fn new(compression: Compression) -> Self {
+        Self::with_output_scale(compression, 1)
+    }
+
+    pub fn with_output_scale(compression: Compression, output_scale: i32) -> Self {
         Self {
             config: ClientConfig {
                 preferred_compression: compression,
@@ -258,13 +275,16 @@ impl AndroidEngine {
             popups: HashMap::new(),
             cursor_image: None,
             host_clipboard: None,
+            output_scale: output_scale.clamp(1, MAX_WAYLAND_SCALE),
             clock: Instant::now(),
         }
     }
 
     pub fn connected(&mut self, session: SessionId) -> EngineOutput {
-        self.connections
-            .insert(session, Connection::new(self.config));
+        self.connections.insert(
+            session,
+            Connection::with_output_scale(self.config, self.output_scale),
+        );
         if let Some(text) = self.host_clipboard.clone() {
             if let Some(connection) = self.connections.get_mut(&session) {
                 let _ = connection.compositor_mut().set_clipboard_text(&text);
@@ -743,7 +763,31 @@ impl AndroidEngine {
         self.flush(key.session)
     }
 
+    pub fn set_output_scale(&mut self, scale: i32) -> Result<EngineOutput, EngineError> {
+        if !(1..=MAX_WAYLAND_SCALE).contains(&scale) {
+            return Err(EngineError::InvalidScale(scale));
+        }
+        if self.output_scale == scale {
+            return Ok(EngineOutput::default());
+        }
+        self.output_scale = scale;
+        let mut output = EngineOutput::default();
+        for session in self.session_ids() {
+            let connection = self
+                .connections
+                .get_mut(&session)
+                .ok_or(EngineError::UnknownSession(session))?;
+            connection.compositor_mut().set_output_scale(scale)?;
+            let outgoing = connection.flush()?;
+            if !outgoing.is_empty() {
+                output.extra_outgoing.push((session, outgoing));
+            }
+        }
+        Ok(output)
+    }
+
     pub fn resize(&mut self, key: SurfaceKey, size: Size) -> Result<EngineOutput, EngineError> {
+        let size = logical_view_size(size, self.output_scale);
         self.connections
             .get_mut(&key.session)
             .ok_or(EngineError::UnknownSession(key.session))?
@@ -1387,5 +1431,59 @@ mod tests {
         engine.pointer(key, 0.1, 0.5, Some((0x110, false))).unwrap();
         assert!(!surface.lock().unwrap().pointer_buttons.contains(&0x110));
         assert!(engine.connections.contains_key(&1));
+    }
+
+    #[test]
+    fn native_scale_converts_auto_resize_view_pixels_to_logical_size() {
+        assert_eq!(
+            logical_view_size(
+                Size {
+                    width: 1000,
+                    height: 501
+                },
+                3
+            ),
+            Size {
+                width: 334,
+                height: 167
+            }
+        );
+        assert_eq!(
+            logical_view_size(
+                Size {
+                    width: 1000,
+                    height: 501
+                },
+                2
+            ),
+            Size {
+                width: 500,
+                height: 251
+            }
+        );
+        assert_eq!(
+            logical_view_size(
+                Size {
+                    width: 1,
+                    height: 1
+                },
+                MAX_WAYLAND_SCALE
+            ),
+            Size {
+                width: 1,
+                height: 1
+            }
+        );
+
+        let mut engine = AndroidEngine::with_output_scale(Compression::None, MAX_WAYLAND_SCALE + 1);
+        assert_eq!(engine.output_scale, MAX_WAYLAND_SCALE);
+        engine.connected(1);
+        engine.receive(1, &header()).unwrap();
+        engine.set_output_scale(2).unwrap();
+        assert_eq!(engine.output_scale, 2);
+        assert!(matches!(
+            engine.set_output_scale(0),
+            Err(EngineError::InvalidScale(0))
+        ));
     }
 }

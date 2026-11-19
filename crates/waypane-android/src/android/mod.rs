@@ -12,7 +12,7 @@ use gpu::{GpuRenderer, RenderOutcome};
 use jni::objects::{JClass, JObject, JString};
 use jni::sys::{jboolean, jfloat, jint, jlong, jobject};
 use jni::{Env, EnvUnowned};
-use waypane_core::Size;
+use waypane_core::{Size, MAX_WAYLAND_SCALE};
 use waypane_render::Viewport;
 use waypane_transport::{Authentication, HostKeyDecision, HostKeyPolicy, RemoteWaypipe, SshConfig};
 use waypipe_client::Compression;
@@ -122,6 +122,15 @@ fn optional_text(env: &mut Env<'_>, value: &JString<'_>) -> Result<Option<String
     Ok((!value.trim().is_empty()).then_some(value))
 }
 
+fn checked_output_scale(scale: jint) -> Result<i32, String> {
+    if !(1..=MAX_WAYLAND_SCALE).contains(&scale) {
+        return Err(format!(
+            "invalid Wayland scale {scale}; expected 1..={MAX_WAYLAND_SCALE}"
+        ));
+    }
+    Ok(scale)
+}
+
 fn key(session: jlong, window: jint) -> Result<SurfaceKey, String> {
     let session = SessionId::try_from(session).map_err(|_| "invalid session id".to_string())?;
     let window = u32::try_from(window).map_err(|_| "invalid window id".to_string())?;
@@ -168,6 +177,7 @@ pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeConnect(
     remote_socket: JString<'_>,
     compression: JString<'_>,
     command: JString<'_>,
+    wayland_scale: jint,
 ) -> jlong {
     jni_guard!(env, env, jlong, {
         init_logging();
@@ -177,6 +187,7 @@ pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeConnect(
             return Err("host and user are required".to_string());
         }
         let port = u16::try_from(port).map_err(|_| "invalid SSH port".to_string())?;
+        let output_scale = checked_output_scale(wayland_scale)?;
         let command = text(env, &command)?;
         let command = shlex::split(&command)
             .filter(|parts| !parts.is_empty())
@@ -229,6 +240,7 @@ pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeConnect(
                     host_key_policy: HostKeyPolicy::Check,
                 },
                 remote,
+                output_scale,
             ),
         });
         let previous = lock(&STATE).replace(NativeEntry { handle, state });
@@ -341,6 +353,21 @@ pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeSetViewport(
         let view = surface(&state, key)?;
         lock(&view).set_viewport(Viewport { zoom, pan_x, pan_y });
         Ok(())
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeSetOutputScale(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    scale: jint,
+) -> jboolean {
+    jni_guard!(env, env, jboolean, {
+        let scale = checked_output_scale(scale)?;
+        Ok(jb(state(handle)?
+            .actor
+            .send(ActorCommand::SetOutputScale(scale))))
     })
 }
 
