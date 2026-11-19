@@ -329,3 +329,84 @@ fn hit_testing_targets_topmost_subsurface_then_popup() {
     fixture.compositor.pointer_motion(1, 4.5, 4.5, 1).unwrap();
     assert_eq!(fixture.compositor.pointer_focus, Some((1, 13, 1.5, 1.5)));
 }
+
+#[test]
+fn supports_shm_backing_larger_than_logical_pool() {
+    let mut compositor = Compositor::new(Arc::from(DEFAULT_KEYMAP));
+    let mut client = Client::new(ClientConfig::default());
+    client.receive(&header()).unwrap();
+    let rid = Rid(99);
+    client.resources_mut().open_file(rid, 16384).unwrap();
+
+    let create_pool = DecodedRequest {
+        object_id: 2,
+        interface: &wl::WL_SHM_INTERFACE,
+        method: method(&wl::WL_SHM_INTERFACE, "create_pool"),
+        opcode: 0,
+        version: 1,
+        args: vec![
+            Value::NewId {
+                id: 60,
+                interface: Some(&wl::WL_SHM_POOL_INTERFACE),
+            },
+            Value::Fd(rid),
+            Value::Int(4096),
+        ],
+    };
+    compositor
+        .dispatch(&mut client, &create_pool, ObjectKind::Shm)
+        .unwrap();
+    assert_eq!(compositor.pools[&60].size, 4096);
+
+    let resize = |size| DecodedRequest {
+        object_id: 60,
+        interface: &wl::WL_SHM_POOL_INTERFACE,
+        method: method(&wl::WL_SHM_POOL_INTERFACE, "resize"),
+        opcode: 1,
+        version: 1,
+        args: vec![Value::Int(size)],
+    };
+    compositor
+        .dispatch(&mut client, &resize(8192), ObjectKind::ShmPool)
+        .unwrap();
+    assert_eq!(compositor.pools[&60].size, 8192);
+
+    let create_buffer = |id, offset| DecodedRequest {
+        object_id: 60,
+        interface: &wl::WL_SHM_POOL_INTERFACE,
+        method: method(&wl::WL_SHM_POOL_INTERFACE, "create_buffer"),
+        opcode: 0,
+        version: 1,
+        args: vec![
+            Value::NewId {
+                id,
+                interface: Some(&wl::WL_BUFFER_INTERFACE),
+            },
+            Value::Int(offset),
+            Value::Int(1),
+            Value::Int(1),
+            Value::Int(4),
+            Value::Uint(0),
+        ],
+    };
+    let error = compositor
+        .dispatch(&mut client, &create_buffer(61, 8192), ObjectKind::ShmPool)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("buffer exceeds pool bounds"), "{error}");
+
+    compositor
+        .dispatch(&mut client, &resize(16384), ObjectKind::ShmPool)
+        .unwrap();
+    compositor
+        .dispatch(&mut client, &create_buffer(62, 8192), ObjectKind::ShmPool)
+        .unwrap();
+    assert_eq!(compositor.buffers[&62].pool_id, 60);
+
+    let error = compositor
+        .dispatch(&mut client, &resize(8192), ObjectKind::ShmPool)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("16384 to 8192"), "{error}");
+    assert_eq!(compositor.pools[&60].size, 16384);
+}

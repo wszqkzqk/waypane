@@ -292,17 +292,22 @@ impl Compositor {
                     .resources()
                     .data(rid)
                     .ok_or_else(|| bad(request, "shm pool has no backing resource"))?;
-                if size <= 0 || usize::try_from(size).ok() != Some(data.len()) {
+                let size = usize::try_from(size)
+                    .map_err(|_| bad(request, "shm pool size must be positive"))?;
+                if size == 0 || size > data.len() {
                     return Err(bad(
                         request,
-                        "shm pool size does not match backing resource",
+                        format!(
+                            "shm pool size {size} exceeds backing resource of {} bytes",
+                            data.len()
+                        ),
                     ));
                 }
                 self.pools.insert(
                     id,
                     Pool {
                         rid,
-                        size: data.len(),
+                        size,
                         buffer_refs: 0,
                         destroyed: false,
                     },
@@ -316,13 +321,18 @@ impl Compositor {
                     .get(&request.object_id)
                     .ok_or_else(|| bad(request, "unknown pool"))?;
                 let available = client.resources().data(pool.rid).map_or(0, <[u8]>::len);
-                if size <= 0
-                    || usize::try_from(size).ok() != Some(available)
-                    || (size as usize) < pool.size
-                {
-                    return Err(bad(request, "invalid shm pool resize"));
+                let size = usize::try_from(size)
+                    .map_err(|_| bad(request, "shm pool resize must be positive"))?;
+                if size == 0 || size < pool.size || size > available {
+                    return Err(bad(
+                        request,
+                        format!(
+                            "invalid shm pool resize from {} to {size} bytes with {available} bytes of backing memory",
+                            pool.size
+                        ),
+                    ));
                 }
-                self.pools.get_mut(&request.object_id).unwrap().size = size as usize;
+                self.pools.get_mut(&request.object_id).unwrap().size = size;
             }
             (ObjectKind::ShmPool, "destroy") => {}
             (ObjectKind::Buffer, "destroy") => {
