@@ -560,11 +560,17 @@ impl GpuRenderer {
         let outcome = surface.present(&mut state, device, adapter, queue)?;
         drop(state);
         if let RenderOutcome::Presented(version) = outcome {
-            if !actor.send(crate::ActorCommand::Presented(key, version)) {
-                return Err(format!(
-                    "failed to queue presentation completion for session {} window {}",
-                    key.session, key.window
-                ));
+            match actor.send_presented(key, version) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    return Ok(RenderOutcome::Idle);
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    return Err(format!(
+                        "presentation completion queue is full for session {} window {}",
+                        key.session, key.window
+                    ));
+                }
             }
         }
         Ok(outcome)

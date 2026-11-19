@@ -45,15 +45,16 @@ fn init_logging() {
                         .map(ToString::to_string)
                 })
                 .unwrap_or_else(|| "non-string panic payload".to_owned());
+            let backtrace = std::backtrace::Backtrace::force_capture();
             if let Some(location) = info.location() {
                 log::error!(
-                    "Rust panic at {}:{}:{}: {message}",
+                    "Rust panic at {}:{}:{}: {message}\n{backtrace}",
                     location.file(),
                     location.line(),
                     location.column()
                 );
             } else {
-                log::error!("Rust panic: {message}");
+                log::error!("Rust panic: {message}\n{backtrace}");
             }
         }));
     });

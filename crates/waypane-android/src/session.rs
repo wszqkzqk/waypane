@@ -67,19 +67,37 @@ impl ActorHandle {
             host_key_prompts: Arc::new(Mutex::new(host_key_prompts)),
         };
         let actor_commands = handle.commands.clone();
+        let panic_events = event_tx.clone();
         thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("failed to create Android Tokio runtime");
-            runtime.block_on(run_actor(
-                config,
-                remote,
-                engine,
-                command_rx,
-                actor_commands,
-                event_tx,
-            ));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("failed to create Android Tokio runtime");
+                runtime.block_on(run_actor(
+                    config,
+                    remote,
+                    engine,
+                    command_rx,
+                    actor_commands,
+                    event_tx,
+                ));
+            }));
+            if let Err(payload) = result {
+                let message = payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| {
+                        payload
+                            .downcast_ref::<&str>()
+                            .map(|value| (*value).to_owned())
+                    })
+                    .unwrap_or_else(|| "non-string panic payload".to_string());
+                let _ = panic_events.send(EngineEvent::Error {
+                    session: None,
+                    message: format!("Android session actor panicked: {message}"),
+                });
+            }
         });
         handle
     }
@@ -100,6 +118,15 @@ impl ActorHandle {
 
     pub fn send(&self, command: ActorCommand) -> bool {
         self.commands.try_send(command).is_ok()
+    }
+
+    pub fn send_presented(
+        &self,
+        key: SurfaceKey,
+        version: u64,
+    ) -> Result<(), mpsc::error::TrySendError<ActorCommand>> {
+        self.commands
+            .try_send(ActorCommand::Presented(key, version))
     }
 
     pub fn resolve_host_key(&self, decision: HostKeyDecision) -> bool {
