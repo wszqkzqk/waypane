@@ -43,7 +43,9 @@ and static content does not run a 60 Hz polling loop.
 ## Implemented
 
 - Waypipe protocol versions 16/17, including `OpenFile`/`ExtendFile`/`BufferFill`/
-  `BufferDiff`, `Close` status, and version negotiation
+  `BufferDiff`, `Close` status, and version negotiation; legacy 0x10 `AckNblocks` frames used
+  by the Waypipe 0.11.3 C implementation are ignored as upstream Rust does, while `Restart`
+  is rejected and the negotiated version is logged
 - Pipe creation, transfers and shutdown in both directions, plus outbound read-only virtual
   files such as `wl_keyboard.keymap`
 - `none`, `lz4`, and `zstd` compression with frame, allocation, and decompression limits
@@ -131,8 +133,10 @@ Workflow runs upload the desktop binaries as `waypane-desktop-<OS>-<ARCH>` and t
 `waypane-android-debug-arm64`. Heavy SDK installations and their licenses live only on
 disposable CI runners. GitHub Actions, Cargo, and Gradle dependencies use current stable
 versions, with Dependabot proposing grouped updates every week. `Cargo.lock` remains
-committed so individual CI runs stay reproducible. The vendored Waypipe version stays fixed
-as the protocol reference and test peer.
+committed so individual CI runs stay reproducible. Non-PR Android builds also reuse a
+CI-only debug-signing cache, so consecutive debug APKs can update over a previously installed
+CI build without uninstalling its app data. The vendored Waypipe version stays fixed as the
+protocol reference and test peer.
 
 Local development only needs a Rust toolchain for workspace checks and unit tests. The
 upstream integration tests remain opt-in when a host-native `waypipe` binary is available.
