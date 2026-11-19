@@ -66,7 +66,11 @@ and static content does not run a 60 Hz polling loop.
   plus Android soft-keyboard integration; ASCII key and delete fallback is used when the
   remote application does not support `text-input-v3`
 - SSH password or public-key authentication, including encrypted private keys with an
-  in-memory passphrase, and strict `known_hosts` verification by default
+  in-memory passphrase, strict `known_hosts` verification by default, and RSA keys negotiated
+  as `rsa-sha2-512`/`rsa-sha2-256` without falling back to legacy `ssh-rsa` (SHA-1)
+- Detailed authentication errors with `user@host:port`, the actual signature algorithm,
+  public-key SHA-256 fingerprint, server-offered remaining methods, and partial-success
+  state; Android mirrors these messages to the `Waypane` Logcat tag (`adb logcat -s Waypane`)
 - Host-key TOFU: desktop `--accept-new-host-key` saves only unknown keys and still rejects
   changed keys; Android displays the SHA-256 fingerprint before saving a new key and requires
   explicit confirmation before replacing a changed key
@@ -105,9 +109,10 @@ WAYPIPE_TEST_BINARY=/path/to/waypipe WAYPIPE_SSHD=/usr/sbin/sshd \
 These upstream tests check SHM pixel replication, damage, reverse keymap file descriptors,
 two-way clipboard transfers, Unicode preedit/commit serials, xdg-toplevel lifecycle, and
 keyboard/pointer delivery against the original Waypipe implementation. `upstream_ssh` also
-starts an isolated `sshd`, logs in with an encrypted Ed25519 private key, exercises
-interactive TOFU, discovers a Termux-style `TMPDIR`, and drives two real Wayland frames over
-SSH `streamlocal` forwarding. It requires `ssh-keygen` and a `/run/sshd` directory on Ubuntu.
+starts an isolated `sshd`, logs in with encrypted Ed25519 and RSA private keys while the
+server is restricted to `ssh-ed25519,rsa-sha2-512,rsa-sha2-256`, exercises interactive TOFU,
+discovers a Termux-style `TMPDIR`, and drives two real Wayland frames over SSH `streamlocal`
+forwarding. It requires `ssh-keygen` and a `/run/sshd` directory on Ubuntu.
 
 ### CI builds and artifacts
 
