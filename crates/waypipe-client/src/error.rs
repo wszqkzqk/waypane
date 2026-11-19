@@ -19,6 +19,11 @@ pub enum Error {
     InvalidWaylandMessage(String),
     UnsupportedFrame(MessageType),
     UnknownRid(Rid),
+    UnknownRidContext {
+        rid: Rid,
+        operation: String,
+        state: &'static str,
+    },
     DuplicateRid(Rid),
     ConnectionClosed,
 }
@@ -43,6 +48,15 @@ impl fmt::Display for Error {
             Self::InvalidWaylandMessage(reason) => write!(f, "invalid Wayland message: {reason}"),
             Self::UnsupportedFrame(kind) => write!(f, "unsupported waypipe frame type {kind:?}"),
             Self::UnknownRid(rid) => write!(f, "unknown waypipe resource id {}", rid.0),
+            Self::UnknownRidContext {
+                rid,
+                operation,
+                state,
+            } => write!(
+                f,
+                "unknown waypipe resource id {} while {operation} ({state})",
+                rid.0
+            ),
             Self::DuplicateRid(rid) => write!(f, "duplicate waypipe resource id {}", rid.0),
             Self::ConnectionClosed => write!(f, "waypipe connection is closed"),
         }

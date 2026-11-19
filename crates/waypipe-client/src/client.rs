@@ -143,7 +143,13 @@ impl Client {
 
         self.decoder.push(remaining);
         while let Some(frame) = self.decoder.next_frame()? {
-            self.process_frame(frame, &mut events)?;
+            let operation = format!("processing {:?} frame", frame.kind);
+            if let Err(error) = self.process_frame(frame, &mut events) {
+                return Err(match error {
+                    Error::UnknownRid(rid) => self.store.unknown_rid(operation, rid),
+                    other => other,
+                });
+            }
             if self.closed {
                 break;
             }

@@ -418,4 +418,40 @@ mod tests {
         assert_eq!(header.compression, Compression::None);
         assert!(!header.has_dmabuf);
     }
+
+    #[test]
+    fn reports_unknown_rid_frame_context_within_bounded_history() {
+        let mut client = negotiated_client();
+        for index in 10..80 {
+            let rid = Rid(index);
+            client.resources_mut().open_file(rid, 0).unwrap();
+            assert!(client.resources_mut().close_resource(rid));
+        }
+        let diff = |rid: Rid| {
+            let mut payload = rid.0.to_le_bytes().to_vec();
+            payload.extend_from_slice(&[0; 8]);
+            encode_frame(MessageType::BufferDiff, &payload).unwrap()
+        };
+        let evicted = client.receive(&diff(Rid(10))).unwrap_err().to_string();
+        assert!(
+            evicted.contains("resource id 10")
+                && evicted.contains("processing BufferDiff frame")
+                && evicted.contains("(not open)"),
+            "{evicted}"
+        );
+        let recent = client.receive(&diff(Rid(79))).unwrap_err().to_string();
+        assert!(
+            recent.contains("resource id 79")
+                && recent.contains("processing BufferDiff frame")
+                && recent.contains("(recently closed by local lifecycle)"),
+            "{recent}"
+        );
+        let unknown = client.receive(&diff(Rid(199))).unwrap_err().to_string();
+        assert!(
+            unknown.contains("resource id 199")
+                && unknown.contains("processing BufferDiff frame")
+                && unknown.contains("(not open)"),
+            "{unknown}"
+        );
+    }
 }

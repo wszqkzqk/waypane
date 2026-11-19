@@ -116,12 +116,15 @@ struct Pipe {
     pending_open: Option<PipeOpenKind>,
 }
 
+const RECENTLY_CLOSED_LIMIT: usize = 64;
+
 #[derive(Debug)]
 pub struct ResourceStore {
     remote_files: BTreeMap<Rid, RemoteFile>,
     local_files: BTreeMap<Rid, LocalFile>,
     pipes: BTreeMap<Rid, Pipe>,
     fresh: BTreeSet<Rid>,
+    recently_closed: VecDeque<Rid>,
     max_file_size: usize,
     max_transfer_size: usize,
     max_total_file_size: usize,
@@ -136,6 +139,7 @@ impl ResourceStore {
             local_files: BTreeMap::new(),
             pipes: BTreeMap::new(),
             fresh: BTreeSet::new(),
+            recently_closed: VecDeque::new(),
             max_file_size,
             max_transfer_size,
             max_total_file_size,
@@ -147,6 +151,7 @@ impl ResourceStore {
     pub fn open_file(&mut self, rid: Rid, size: i32) -> Result<usize, Error> {
         let size = self.validate_new_allocation(size, 0)?;
         self.ensure_new_rid(rid)?;
+        self.recently_closed.retain(|closed| *closed != rid);
         self.remote_files.insert(
             rid,
             RemoteFile {
@@ -164,6 +169,7 @@ impl ResourceStore {
             .map_err(|_| Error::InvalidFrame("local file is too large for Waypipe".to_string()))?;
         self.validate_new_allocation(size, 0)?;
         self.ensure_new_rid(rid)?;
+        self.recently_closed.retain(|closed| *closed != rid);
         self.allocated_file_size += data.len();
         self.local_files.insert(
             rid,
@@ -199,6 +205,7 @@ impl ResourceStore {
 
     pub fn open_remote_pipe(&mut self, rid: Rid, kind: PipeOpenKind) -> Result<(), Error> {
         self.ensure_new_rid(rid)?;
+        self.recently_closed.retain(|closed| *closed != rid);
         self.pipes.insert(
             rid,
             Pipe {
@@ -217,6 +224,7 @@ impl ResourceStore {
 
     pub fn create_local_pipe(&mut self, rid: Rid, kind: PipeOpenKind) -> Result<(), Error> {
         self.ensure_new_rid(rid)?;
+        self.recently_closed.retain(|closed| *closed != rid);
         self.pipes.insert(
             rid,
             Pipe {
@@ -530,8 +538,14 @@ impl ResourceStore {
         if let Some(size) = file_size {
             self.allocated_file_size -= size;
         }
-        let pipe_removed = self.pipes.remove(&rid).is_some();
-        file_size.is_some() || pipe_removed
+        let removed = file_size.is_some() || self.pipes.remove(&rid).is_some();
+        if removed {
+            if self.recently_closed.len() == RECENTLY_CLOSED_LIMIT {
+                self.recently_closed.pop_front();
+            }
+            self.recently_closed.push_back(rid);
+        }
+        removed
     }
 
     pub fn shared_data(&self, rid: Rid) -> Option<ShmData> {
@@ -613,5 +627,18 @@ impl ResourceStore {
             )));
         }
         Ok(size)
+    }
+
+    pub(crate) fn unknown_rid(&self, operation: String, rid: Rid) -> Error {
+        let state = if self.recently_closed.contains(&rid) {
+            "recently closed by local lifecycle"
+        } else {
+            "not open"
+        };
+        Error::UnknownRidContext {
+            rid,
+            operation,
+            state,
+        }
     }
 }
