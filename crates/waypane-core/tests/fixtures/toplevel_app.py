@@ -14,6 +14,8 @@ saw_keyboard_enter = False
 saw_pointer_enter = False
 saw_key = False
 keyboard_events = []
+preferred_scale = 1
+expect_native_scale = os.environ.get("WAYPANE_EXPECT_NATIVE_SCALE") == "1"
 
 
 def message(object_id, opcode, payload):
@@ -75,6 +77,20 @@ def track_input(object_id, opcode, payload):
         saw_key = True
 
 
+def update_preferred_scale(object_id, opcode, payload):
+    global preferred_scale
+    if object_id == 15 and opcode == 2:
+        assert len(payload) == 4, f"preferred_buffer_scale payload: {payload.hex()}"
+        scale = struct.unpack("<i", payload)[0]
+        assert 1 <= scale <= 8, f"invalid preferred buffer scale {scale}"
+        preferred_scale = scale
+
+
+def apply_preferred_scale():
+    if preferred_scale != 1:
+        sock.sendall(message(15, 8, struct.pack("<i", preferred_scale)))
+
+
 def wait_done(callback_id):
     for object_id, opcode, payload, descriptors in events():
         for fd in descriptors:
@@ -103,9 +119,9 @@ for object_id, opcode, payload, _ in events():
         break
 assert {"wl_compositor", "wl_shm", "xdg_wm_base", "wl_seat", "wl_output"} <= globals_by_name.keys()
 
-bind(2, globals_by_name["wl_compositor"], "wl_compositor", 5, 4)
+bind(2, globals_by_name["wl_compositor"], "wl_compositor", 6, 4)
 bind(2, globals_by_name["wl_shm"], "wl_shm", 1, 5)
-bind(2, globals_by_name["xdg_wm_base"], "xdg_wm_base", 5, 6)
+bind(2, globals_by_name["xdg_wm_base"], "xdg_wm_base", 6, 6)
 bind(2, globals_by_name["wl_seat"], "wl_seat", 7, 7)
 bind(2, globals_by_name["wl_output"], "wl_output", 4, 25)
 sock.sendall(message(7, 1, struct.pack("<I", 13)))
@@ -126,11 +142,16 @@ wait_done(14)
 sock.sendall(message(4, 0, struct.pack("<I", 15)))
 sock.sendall(message(6, 2, struct.pack("<II", 16, 15)))
 sock.sendall(message(16, 1, struct.pack("<I", 17)))
-for object_id, opcode, payload, _ in events():
+for object_id, opcode, payload, descriptors in events():
+    for fd in descriptors:
+        os.close(fd)
+    update_preferred_scale(object_id, opcode, payload)
     if object_id == 16 and opcode == 0:
         serial = struct.unpack("<I", payload)[0]
         sock.sendall(message(16, 4, struct.pack("<I", serial)))
         break
+if expect_native_scale:
+    assert preferred_scale == 2, f"initial preferred buffer scale was {preferred_scale}"
 title = b"Waypane E2E\0"
 app_id = b"waypane-test\0" + b"\0\0\0"
 sock.sendall(message(17, 2, struct.pack("<I", len(b"Waypane E2E\0")) + title))
@@ -143,6 +164,7 @@ with tempfile.TemporaryFile() as pool:
     rights = array.array("i", [pool.fileno()])
     sock.sendmsg([create_pool], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, rights.tobytes())])
     sock.sendall(message(18, 0, struct.pack("<IiiiiI", 20, 0, 32, 32, 128, 1)))
+    apply_preferred_scale()
     sock.sendall(message(15, 1, struct.pack("<Iii", 20, 0, 0)))
     sock.sendall(message(15, 9, struct.pack("<iiii", 0, 0, 32, 32)))
     sock.sendall(message(15, 3, struct.pack("<I", 21)))
@@ -157,10 +179,21 @@ with tempfile.TemporaryFile() as pool:
         if released and done:
             break
 
+    if expect_native_scale:
+        while preferred_scale != 3:
+            for object_id, opcode, payload, descriptors in events():
+                for fd in descriptors:
+                    os.close(fd)
+                track_input(object_id, opcode, payload)
+                update_preferred_scale(object_id, opcode, payload)
+                if preferred_scale == 3:
+                    break
+
     pool.seek(4)
     pool.write(b"\xaa" * 8)
     pool.flush()
     sock.sendall(message(18, 0, struct.pack("<IiiiiI", 22, 0, 32, 32, 128, 1)))
+    apply_preferred_scale()
     sock.sendall(message(15, 1, struct.pack("<Iii", 22, 0, 0)))
     sock.sendall(message(15, 3, struct.pack("<I", 23)))
     sock.sendall(message(15, 6, b""))

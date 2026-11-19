@@ -41,10 +41,13 @@ fn serve(mut stream: UnixStream, compression: Compression) -> Result<(), String>
         .set_read_timeout(Some(Duration::from_millis(100)))
         .map_err(|error| error.to_string())?;
     let started = Instant::now();
-    let mut connection = Connection::new(ClientConfig {
-        preferred_compression: compression,
-        ..ClientConfig::default()
-    });
+    let mut connection = Connection::with_output_scale(
+        ClientConfig {
+            preferred_compression: compression,
+            ..ClientConfig::default()
+        },
+        2,
+    );
     let mut frames = 0;
     let mut bytes = [0u8; 65536];
 
@@ -77,6 +80,13 @@ fn serve(mut stream: UnixStream, compression: Compression) -> Result<(), String>
             match event {
                 CoreEvent::Frame(frame) => {
                     let buffer = frame.buffer.as_ref().ok_or("frame without buffer")?;
+                    let expected_scale = if frames == 0 { 2 } else { 3 };
+                    if buffer.scale != expected_scale {
+                        return Err(format!(
+                            "frame {frames} has buffer scale {} instead of {expected_scale}",
+                            buffer.scale
+                        ));
+                    }
                     let mut expected =
                         (bytes::Bytes::from((0u8..=255).collect::<Vec<_>>())).repeat(16);
                     if frames > 0 {
@@ -115,6 +125,10 @@ fn serve(mut stream: UnixStream, compression: Compression) -> Result<(), String>
                         connection
                             .compositor_mut()
                             .key(42, true, 102)
+                            .map_err(|error| error.to_string())?;
+                        connection
+                            .compositor_mut()
+                            .set_output_scale(3)
                             .map_err(|error| error.to_string())?;
                         let input = connection.flush().map_err(|error| error.to_string())?;
                         if !input.is_empty() {
@@ -173,6 +187,7 @@ fn drives_xdg_toplevel_through_upstream_waypipe() {
         .arg("python3")
         .arg(script)
         .env("XDG_RUNTIME_DIR", &runtime.0)
+        .env("WAYPANE_EXPECT_NATIVE_SCALE", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

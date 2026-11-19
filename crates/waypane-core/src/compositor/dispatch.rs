@@ -421,7 +421,6 @@ impl Compositor {
                     geometry: Rect::default(),
                 };
                 self.windows.insert(id, window);
-                self.emit_window_preferred_scale(id);
                 let serial = self.next_serial();
                 self.xdg_surfaces
                     .get_mut(&request.object_id)
