@@ -71,7 +71,14 @@ Wayland frame callbacks.
   `ExtendFile` updates use `Arc` copy-on-write, so retiring a quickly superseded buffer and
   closing its pool cannot leave a queued resize frame with a missing RID. Unique SHM
   allocations queued by one receive batch are bounded to 256 MiB; Android and desktop both
-  render from the frame-owned snapshot instead of looking up the RID later. Canvas replaces a
+  render from the frame-owned snapshot instead of looking up the RID later. As in upstream
+  Waypipe, remote SHM mappings follow transport lifetime rather than `wl_shm_pool` object
+  lifetime, so an asynchronous `BufferDiff` arriving after all pools/buffers are retired is
+  still applied. Remote SHM remains bounded to 256 MiB per file and 1 GiB per connection;
+  exceeding the total is an explicit resource-limit error. Pipes are released independently via
+  `close_pipe` after EOF/shutdown, while `close_transport_file` is reserved for explicit
+  transport-level removal. Unknown RID errors include the frame type and a bounded 64-entry
+  `recently closed`/`not open` state. Canvas replaces a
   layer's pixel allocation whenever its committed dimensions change, and empty commits without
   attach, damage, callback, or z-order changes do not manufacture frames
 - Disjoint `wl_region` rectangle algebra (bounded to 1024 rectangles, transactional on error),
@@ -312,20 +319,22 @@ window is not counted as presented.
   automated run of the current code reached frame upload and `RedrawRequested`, but AppKit
   reported the 64x64 CLI-created window as `Occluded`, so that run did not claim a new on-screen
   presentation.
-- GitHub Actions run `44475866518` passed formatting/Clippy, all upstream Waypipe integration
-  tests (including `wl_pointer.set_cursor`), native Windows and macOS checks/tests/release builds,
-  and a complete Android APK build with JDK 25, Gradle 9.9.1, AGP 9.5.1, Kotlin 2.4.21, SDK 37.2,
-  and NDK 30.0.16248370. All three build artifacts were uploaded.
+- GitHub Actions runs `44484669930` and `44511091280` passed formatting/Clippy, all upstream
+  Waypipe integration tests, native Windows and macOS checks/tests/release builds, and complete
+  Android APK builds with JDK 25, Gradle 9.9.1, AGP 9.5.1, Kotlin 2.4.21, SDK 37.2, and NDK
+  30.0.16248370. Run `44484669930` includes `wl_data_offer.accept`, `set_cursor` with the actual
+  latest pointer-enter serial, and 16-byte evdev 42 keyboard payloads; run `44504250631` also
+  passed for the dedicated Android Keyboard button.
 - CI-produced APKs containing `lib/arm64-v8a/libwaypane_android.so` were installed on a physical
   Xiaomi Android 16 device with a Mali-G610 GPU. They negotiated RGBA8 with Vulkan, connected to
   Termux Waypipe 0.11.3 over an imported encrypted RSA key, presented Weston frames, and
   reconfigured surfaces across portrait, landscape, and immersive sizes without GPU validation
   errors. Interactive testing exposed non-resizing layer allocations and missing
-  `wl_pointer.set_cursor`; those were fixed and covered by run `44475866518`. The subsequent
-  full-request audit fixes (`wl_data_offer.accept`, input regions, XDG popup/limits, output
-  membership, and exact evdev key payloads) pass the host workspace and Clippy. Their expanded
-  upstream fixtures and latest Android GPU build still require a new CI and device run before
-  claiming runtime verification for that revision.
+  `wl_pointer.set_cursor`; those were subsequently fixed. On-device Auto-resize then revealed an
+  asynchronous `BufferDiff` for RID 3 after premature local closure by `wl_shm_pool` teardown. The
+  resulting transport-lifetime SHM fix passes the host workspace and Clippy, including a true
+  post-retirement diff regression test, but still requires a new CI and device run before its
+  runtime behavior is considered verified.
 - The Windows desktop binary has not been launched on a physical Windows device, so its
   interactive GUI, input, clipboard, and lifecycle behavior remain runtime-unverified.
 
