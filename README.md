@@ -84,6 +84,10 @@ and static content does not run a 60 Hz polling loop.
   remote-socket overrides; application commands remain separate from Waypipe options
 - Android atomic SAF private-key import with a 64 KiB limit, owner-only app-private storage,
   backup exclusion for keys and `known_hosts`, and a true delete-imported-key action
+- Android presentation selects only `RENDER_ATTACHMENT`-compatible RGBA/BGRA 8-bit formats
+  rather than blindly taking the first Vulkan format (which can be compressed ASTC on Mali).
+  RenderThread JNI errors are caught and shown in the UI instead of crashing; `WaypaneRust`
+  and `WaypaneRender` Logcat tags expose adapter/format, panic location, and GPU errors
 
 ## Build and test
 
@@ -93,7 +97,11 @@ Rust 1.90 or later is required by the workspace; CI tracks the latest stable rel
 cargo check --workspace --all-targets --features jni-check --locked
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --features jni-check --locked -- -D warnings
+cargo test -p waypane-android --features jni-check --locked
 ```
+
+The host `jni-check` test uses null ANativeWindow stubs so JNI and surface-format logic can be
+run without linking Android's `libandroid`; Android builds still link the real NDK library.
 
 Integration tests that require a host-native upstream Waypipe binary:
 
