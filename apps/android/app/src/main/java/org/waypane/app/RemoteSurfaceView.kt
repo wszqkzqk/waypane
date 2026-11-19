@@ -101,7 +101,20 @@ class RemoteSurfaceView(
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
+        attachNativeSurface(holder, width.coerceAtLeast(1), height.coerceAtLeast(1), reportFailure = false)
+    }
+
+    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+        if (attached) {
+            resizeNativeSurface(width, height)
+        } else {
+            attachNativeSurface(holder, width.coerceAtLeast(1), height.coerceAtLeast(1), reportFailure = true)
+        }
+    }
+
+    private fun attachNativeSurface(holder: SurfaceHolder, width: Int, height: Int, reportFailure: Boolean) {
         renderHandler.post {
+            if (attached) return@post
             val handle = handle()
             if (handle == 0L) return@post
             runCatching {
@@ -110,26 +123,30 @@ class RemoteSurfaceView(
                     key.session,
                     key.window,
                     holder.surface,
-                    width.coerceAtLeast(1),
-                    height.coerceAtLeast(1),
+                    width,
+                    height,
                 )
                 if (!attached) error("nativeAttachSurface returned false")
             }.onFailure { error ->
-                reportRenderError("Failed to initialize Android GPU surface", error)
+                attached = false
+                if (reportFailure) {
+                    reportRenderError("Failed to initialize Android GPU surface", error)
+                } else {
+                    Log.w(TAG, "Android GPU surface is not ready; retrying on surfaceChanged", error)
+                }
             }
             if (attached) scheduleDirtyWait()
         }
     }
 
-    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+    private fun resizeNativeSurface(width: Int, height: Int) {
         renderHandler.post {
             val handle = handle()
-            if (attached && handle != 0L) {
-                runCatching {
-                    NativeBridge.nativeResizeSurface(handle, key.session, key.window, width, height)
-                }.onFailure { error ->
-                    reportRenderError("Failed to resize Android GPU surface", error)
-                }
+            if (!attached || handle == 0L) return@post
+            runCatching {
+                NativeBridge.nativeResizeSurface(handle, key.session, key.window, width, height)
+            }.onFailure { error ->
+                reportRenderError("Failed to resize Android GPU surface", error)
             }
             if (attached) requestRenderIfDirty()
         }
