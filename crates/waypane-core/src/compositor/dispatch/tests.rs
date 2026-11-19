@@ -1665,3 +1665,62 @@ fn surface_output_events(messages: &[WaylandMessage], name: &str) -> Vec<(u32, u
         })
         .collect()
 }
+
+#[test]
+fn encodes_keyboard_keymap_and_input_events_with_full_arguments() {
+    let mut fixture = Fixture::new();
+    replace_record(&mut fixture, 70, &wl::WL_SEAT_INTERFACE);
+    fixture.compositor.seats.insert(70, Seat::default());
+    fixture
+        .compositor
+        .dispatch(
+            &mut fixture.client,
+            &request(
+                70,
+                &wl::WL_SEAT_INTERFACE,
+                "get_keyboard",
+                7,
+                vec![Value::NewId {
+                    id: 61,
+                    interface: Some(&wl::WL_KEYBOARD_INTERFACE),
+                }],
+            ),
+            ObjectKind::Seat,
+        )
+        .unwrap();
+    fixture.compositor.keyboard_focus(Some(1)).unwrap();
+    fixture.compositor.key(42, true, 102).unwrap();
+    let messages = outbound_messages(&mut fixture.compositor, &mut fixture.client);
+    let words = |opcode: u16| {
+        messages
+            .iter()
+            .find(|message| message.object_id() == 61 && message.opcode() == opcode)
+            .unwrap_or_else(|| panic!("missing keyboard event {opcode} in {messages:?}"))
+            .payload()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| u32::from_le_bytes(*bytes))
+            .collect::<Vec<_>>()
+    };
+
+    let keymap = words(event_opcode(&wl::WL_KEYBOARD_INTERFACE, "keymap"));
+    assert_eq!(keymap[0], 1);
+    assert_eq!(keymap[1] as usize, DEFAULT_KEYMAP.len());
+    assert_eq!(
+        words(event_opcode(&wl::WL_KEYBOARD_INTERFACE, "repeat_info")),
+        [25, 600]
+    );
+    let enter = words(event_opcode(&wl::WL_KEYBOARD_INTERFACE, "enter"));
+    assert_eq!(enter[1], 10);
+    assert_eq!(enter[2], 0);
+    assert_eq!(enter.len(), 3);
+    assert_eq!(
+        words(event_opcode(&wl::WL_KEYBOARD_INTERFACE, "modifiers")).len(),
+        5
+    );
+    let key = words(event_opcode(&wl::WL_KEYBOARD_INTERFACE, "key"));
+    assert_eq!(key.len(), 4);
+    assert_eq!(key[1], 102);
+    assert_eq!(key[2..], [42, 1]);
+}

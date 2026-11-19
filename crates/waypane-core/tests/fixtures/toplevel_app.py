@@ -55,7 +55,7 @@ def events():
                 yield object_id, opcode, payload, descriptors
 
 
-def track_input(object_id, opcode):
+def track_input(object_id, opcode, payload):
     global saw_keyboard_enter, saw_pointer_enter, saw_key
     if object_id == 13:
         keyboard_events.append((opcode, payload.hex()))
@@ -79,7 +79,7 @@ def wait_done(callback_id):
     for object_id, opcode, payload, descriptors in events():
         for fd in descriptors:
             os.close(fd)
-        track_input(object_id, opcode)
+        track_input(object_id, opcode, payload)
         if object_id == callback_id and opcode == 0:
             return
 
@@ -165,10 +165,10 @@ with tempfile.TemporaryFile() as pool:
     sock.sendall(message(15, 3, struct.pack("<I", 23)))
     sock.sendall(message(15, 6, b""))
     released = done = False
-    for object_id, opcode, _, descriptors in events():
+    for object_id, opcode, payload, descriptors in events():
         for fd in descriptors:
             os.close(fd)
-        track_input(object_id, opcode)
+        track_input(object_id, opcode, payload)
         released |= object_id == 22 and opcode == 0
         done |= object_id == 23 and opcode == 0
         if released and done:
