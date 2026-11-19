@@ -64,6 +64,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import kotlinx.coroutines.delay
 
@@ -90,9 +91,9 @@ fun WaypaneApp(model: WaypaneViewModel) {
         controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         WindowCompat.setDecorFitsSystemWindows(activity.window, !state.immersive)
         if (state.immersive) {
-            controller.hide(WindowInsetsControllerCompat.Type.systemBars())
+            controller.hide(WindowInsetsCompat.Type.systemBars())
         } else {
-            controller.show(WindowInsetsControllerCompat.Type.systemBars())
+            controller.show(WindowInsetsCompat.Type.systemBars())
         }
     }
     LaunchedEffect(state.screen) {
@@ -103,7 +104,7 @@ fun WaypaneApp(model: WaypaneViewModel) {
             hostView.keepScreenOn = false
             WindowCompat.setDecorFitsSystemWindows(activity.window, true)
             WindowCompat.getInsetsController(activity.window, hostView)
-                .show(WindowInsetsControllerCompat.Type.systemBars())
+                .show(WindowInsetsCompat.Type.systemBars())
         }
     }
 
