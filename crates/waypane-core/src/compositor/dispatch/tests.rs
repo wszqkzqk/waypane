@@ -1759,3 +1759,169 @@ fn retired_shm_pool_keeps_wire_mapping_for_late_diffs() {
     );
     assert_eq!(fixture.client.resources().allocated_file_size(), 4);
 }
+
+#[test]
+fn emits_and_inherits_wayland_buffer_scales() {
+    let mut fixture = Fixture::new();
+    for id in [10, 11, 12] {
+        replace_record(&mut fixture, id, &wl::WL_SURFACE_INTERFACE);
+        fixture.compositor.surfaces.get_mut(&id).unwrap().window_id = Some(1);
+    }
+    fixture.compositor.output_scale = 2;
+    fixture
+        .compositor
+        .dispatch(
+            &mut fixture.client,
+            &request(
+                5,
+                &wl::WL_COMPOSITOR_INTERFACE,
+                "create_surface",
+                6,
+                vec![Value::NewId {
+                    id: 70,
+                    interface: Some(&wl::WL_SURFACE_INTERFACE),
+                }],
+            ),
+            ObjectKind::Compositor,
+        )
+        .unwrap();
+    let messages = outbound_messages(&mut fixture.compositor, &mut fixture.client);
+    assert_eq!(
+        scale_events(
+            &messages,
+            &wl::WL_SURFACE_INTERFACE,
+            "preferred_buffer_scale",
+            &[10, 11, 12, 13, 70]
+        ),
+        [(70, 2)]
+    );
+
+    fixture.compositor.set_window_scale(1, 3).unwrap();
+    let messages = outbound_messages(&mut fixture.compositor, &mut fixture.client);
+    assert_eq!(
+        scale_events(
+            &messages,
+            &wl::WL_SURFACE_INTERFACE,
+            "preferred_buffer_scale",
+            &[10, 11, 12, 13, 70]
+        ),
+        [(10, 3), (11, 3), (12, 3)]
+    );
+    fixture.compositor.set_window_scale(1, 3).unwrap();
+    assert!(outbound_messages(&mut fixture.compositor, &mut fixture.client).is_empty());
+
+    replace_record(&mut fixture, 13, &wl::WL_SURFACE_INTERFACE);
+    fixture.compositor.surfaces.insert(
+        13,
+        Surface {
+            window_id: Some(90),
+            ..Surface::default()
+        },
+    );
+    fixture.compositor.windows.insert(
+        90,
+        Window {
+            id: 90,
+            xdg_surface_id: 31,
+            surface_id: 13,
+            kind: WindowKind::Popup { parent: 1 },
+            title: String::new(),
+            app_id: String::new(),
+            geometry: Rect::default(),
+        },
+    );
+    fixture.compositor.emit_window_preferred_scale(90);
+    assert_eq!(
+        scale_events(
+            &outbound_messages(&mut fixture.compositor, &mut fixture.client),
+            &wl::WL_SURFACE_INTERFACE,
+            "preferred_buffer_scale",
+            &[10, 11, 12, 13, 70]
+        ),
+        [(13, 3)]
+    );
+    fixture.compositor.set_window_scale(90, 2).unwrap();
+    assert_eq!(
+        scale_events(
+            &outbound_messages(&mut fixture.compositor, &mut fixture.client),
+            &wl::WL_SURFACE_INTERFACE,
+            "preferred_buffer_scale",
+            &[10, 11, 12, 13, 70]
+        ),
+        [(13, 2)]
+    );
+    fixture.compositor.set_window_scale(1, 5).unwrap();
+    assert_eq!(
+        scale_events(
+            &outbound_messages(&mut fixture.compositor, &mut fixture.client),
+            &wl::WL_SURFACE_INTERFACE,
+            "preferred_buffer_scale",
+            &[10, 11, 12, 13, 70]
+        ),
+        [(10, 5), (11, 5), (12, 5)]
+    );
+
+    replace_record(&mut fixture, 80, &wl::WL_OUTPUT_INTERFACE);
+    fixture.compositor.outputs.push(80);
+    fixture.compositor.set_output_scale(2).unwrap();
+    let messages = outbound_messages(&mut fixture.compositor, &mut fixture.client);
+    assert_eq!(
+        scale_events(&messages, &wl::WL_OUTPUT_INTERFACE, "scale", &[80]),
+        [(80, 2)]
+    );
+    assert!(messages.iter().any(|message| message.object_id() == 80
+        && message.opcode() == event_opcode(&wl::WL_OUTPUT_INTERFACE, "done")));
+    assert_eq!(messages.len(), 7);
+    assert_eq!(
+        scale_events(
+            &messages,
+            &wl::WL_SURFACE_INTERFACE,
+            "preferred_buffer_scale",
+            &[10, 11, 12, 13, 70]
+        ),
+        [(10, 2), (11, 2), (12, 2), (13, 2), (70, 2)]
+    );
+    assert_eq!(fixture.compositor.output_scale(), 2);
+    assert!(fixture.compositor.window_scales.is_empty());
+
+    fixture.compositor.set_output_scale(1).unwrap();
+    let messages = outbound_messages(&mut fixture.compositor, &mut fixture.client);
+    assert_eq!(
+        scale_events(&messages, &wl::WL_OUTPUT_INTERFACE, "scale", &[80]),
+        [(80, 1)]
+    );
+    assert_eq!(
+        scale_events(
+            &messages,
+            &wl::WL_SURFACE_INTERFACE,
+            "preferred_buffer_scale",
+            &[10, 11, 12, 13, 70]
+        ),
+        [(10, 1), (11, 1), (12, 1), (13, 1), (70, 1)]
+    );
+    assert!(fixture.compositor.set_output_scale(0).is_err());
+    assert_eq!(fixture.compositor.output_scale(), 1);
+}
+
+fn scale_events(
+    messages: &[WaylandMessage],
+    interface: &'static Interface,
+    name: &str,
+    objects: &[u32],
+) -> Vec<(u32, i32)> {
+    let opcode = event_opcode(interface, name);
+    messages
+        .iter()
+        .filter(|message| {
+            objects.contains(&message.object_id())
+                && message.opcode() == opcode
+                && message.payload().len() >= 4
+        })
+        .map(|message| {
+            (
+                message.object_id(),
+                i32::from_le_bytes(message.payload()[..4].try_into().unwrap()),
+            )
+        })
+        .collect()
+}

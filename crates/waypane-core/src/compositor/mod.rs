@@ -12,10 +12,12 @@ use crate::protocol::{
 };
 mod clipboard;
 mod dispatch;
+mod scale;
 mod text_input;
 mod xdg_shell;
 use crate::state::*;
 use crate::types::*;
+pub use scale::MAX_WAYLAND_SCALE;
 
 #[derive(Debug, Default, Clone, Copy)]
 struct Modifiers {
@@ -72,6 +74,7 @@ pub struct Compositor {
     windows: BTreeMap<WindowId, Window>,
     positioners: BTreeMap<u32, Positioner>,
     popup_positioners: BTreeMap<WindowId, Positioner>,
+    window_scales: BTreeMap<WindowId, i32>,
     seats: BTreeMap<u32, Seat>,
     pointers: BTreeMap<u32, PointerState>,
     outputs: Vec<u32>,
@@ -106,6 +109,10 @@ pub struct Compositor {
 
 impl Compositor {
     pub fn new(keymap: Arc<[u8]>) -> Self {
+        Self::with_output_scale(keymap, 1)
+    }
+
+    pub fn with_output_scale(keymap: Arc<[u8]>, scale: i32) -> Self {
         let mut objects = BTreeMap::new();
         objects.insert(1, ObjectRecord::new(&wl::WL_DISPLAY_INTERFACE, 1));
         Self {
@@ -118,6 +125,7 @@ impl Compositor {
             windows: BTreeMap::new(),
             positioners: BTreeMap::new(),
             popup_positioners: BTreeMap::new(),
+            window_scales: BTreeMap::new(),
             seats: BTreeMap::new(),
             pointers: BTreeMap::new(),
             outputs: Vec::new(),
@@ -140,7 +148,7 @@ impl Compositor {
                 width: 1920,
                 height: 1080,
             },
-            output_scale: 1,
+            output_scale: scale.clamp(1, MAX_WAYLAND_SCALE),
             keyboard_focus: None,
             pointer_focus: None,
             pointer_window: None,

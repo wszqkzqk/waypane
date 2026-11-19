@@ -136,6 +136,7 @@ impl Compositor {
             (ObjectKind::Compositor, "create_surface") => {
                 let id = self.create_new(request, 0)?;
                 self.surfaces.insert(id, Surface::default());
+                self.emit_preferred_scale(id);
             }
             (ObjectKind::Compositor, "create_region") => {
                 let id = self.create_new(request, 0)?;
@@ -184,6 +185,7 @@ impl Compositor {
                     .entry(parent)
                     .or_default()
                     .push(surface);
+                self.emit_preferred_scale(surface);
             }
             (ObjectKind::Subsurface, "set_position") => {
                 let surface = self.subsurface_surface(request.object_id)?;
@@ -419,6 +421,7 @@ impl Compositor {
                     geometry: Rect::default(),
                 };
                 self.windows.insert(id, window);
+                self.emit_window_preferred_scale(id);
                 let serial = self.next_serial();
                 self.xdg_surfaces
                     .get_mut(&request.object_id)

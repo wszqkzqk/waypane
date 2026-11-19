@@ -28,9 +28,21 @@ impl Connection {
     }
 
     pub fn with_keymap(config: ClientConfig, keymap: Arc<[u8]>) -> Self {
+        Self::with_keymap_and_output_scale(config, keymap, 1)
+    }
+
+    pub fn with_output_scale(config: ClientConfig, scale: i32) -> Self {
+        Self::with_keymap_and_output_scale(config, Arc::from(DEFAULT_KEYMAP), scale)
+    }
+
+    pub fn with_keymap_and_output_scale(
+        config: ClientConfig,
+        keymap: Arc<[u8]>,
+        scale: i32,
+    ) -> Self {
         Self {
             client: Client::new(config),
-            compositor: Compositor::new(keymap),
+            compositor: Compositor::with_output_scale(keymap, scale),
             rids: VecDeque::new(),
         }
     }

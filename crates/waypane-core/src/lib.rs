@@ -17,7 +17,7 @@ mod wayland_backend {
 #[cfg(unix)]
 pub use wayland_backend;
 
-pub use compositor::Compositor;
+pub use compositor::{Compositor, MAX_WAYLAND_SCALE};
 pub use connection::{Connection, CoreBatch};
 pub use error::{Error, Result};
 pub use types::*;

@@ -122,6 +122,7 @@ impl Compositor {
             },
         );
         self.popup_positioners.insert(id, positioner);
+        self.emit_window_preferred_scale(id);
         self.configure_popup(id, request.object_id, geometry, None);
         let info = self.window_info(id).unwrap();
         self.events.push(CoreEvent::WindowCreated(info));
