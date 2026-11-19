@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Duration;
@@ -168,14 +168,25 @@ async fn run_actor(
     let mut ssh_events = session.take_events();
     let mut ssh_open = true;
     let mut remote_exited = false;
+    let mut accepted_any = false;
+    let mut exit_status = None;
+    let mut recent_output = VecDeque::new();
 
     loop {
         if remote_exited && lock(&routes).is_empty() {
+            if !accepted_any {
+                let message = pre_connection_exit_message(exit_status, &recent_output);
+                let _ = events.send(EngineEvent::Error {
+                    session: None,
+                    message,
+                });
+            }
             break;
         }
         tokio::select! {
             stream = session.accept(), if ssh_open => match stream {
                 Some(stream) => {
+                    accepted_any = true;
                     let session_id = next_session_id();
                     let output = lock(&engine).connected(session_id);
                     emit_output(&events, output.events);
@@ -188,14 +199,15 @@ async fn run_actor(
             },
             status = next_status(&mut ssh_events) => match status {
                 Some(CommandEvent::Stdout(data)) | Some(CommandEvent::Stderr(data)) => {
-                    let _ = events.send(EngineEvent::Status {
-                        message: String::from_utf8_lossy(&data).into_owned(),
-                    });
+                    let message = String::from_utf8_lossy(&data).into_owned();
+                    record_remote_output(&mut recent_output, &message);
+                    let _ = events.send(EngineEvent::Status { message });
                 }
                 Some(CommandEvent::ExitStatus(status)) => {
                     let _ = events.send(EngineEvent::Status {
                         message: format!("remote command exited: {status:?}"),
                     });
+                    exit_status = Some(status);
                     remote_exited = true;
                 }
                 None => {
@@ -275,6 +287,37 @@ async fn run_actor(
             message: error.to_string(),
         });
     }
+}
+
+const MAX_RECENT_REMOTE_CHUNKS: usize = 8;
+const MAX_RECENT_REMOTE_CHUNK_CHARS: usize = 512;
+
+fn record_remote_output(output: &mut VecDeque<String>, chunk: &str) {
+    if output.len() == MAX_RECENT_REMOTE_CHUNKS {
+        output.pop_front();
+    }
+    output.push_back(chunk.chars().take(MAX_RECENT_REMOTE_CHUNK_CHARS).collect());
+}
+
+fn pre_connection_exit_message(status: Option<Option<u32>>, output: &VecDeque<String>) -> String {
+    let reason = status.map_or_else(
+        || "SSH session ended".to_string(),
+        |status| format!("remote command exited with status {status:?}"),
+    );
+    let text = output
+        .iter()
+        .map(String::as_str)
+        .filter(|chunk| !chunk.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let details = if text.is_empty() {
+        String::new()
+    } else {
+        format!("; recent remote output: {text}")
+    };
+    format!(
+        "{reason} before any Waypipe client connected; verify that `waypipe` is installed and the application command exists on the host{details}"
+    )
 }
 
 async fn next_status(events: &mut Option<mpsc::Receiver<CommandEvent>>) -> Option<CommandEvent> {
@@ -374,4 +417,40 @@ fn next_session_id() -> SessionId {
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reports_remote_exit_before_first_waypipe_stream() {
+        let output = VecDeque::from([String::new(), "sh: 1: foot: not found\n".to_string()]);
+        let message = pre_connection_exit_message(Some(Some(127)), &output);
+        assert!(
+            message.contains("remote command exited with status Some(127)")
+                && message.contains("before any Waypipe client connected")
+                && message.contains("sh: 1: foot: not found"),
+            "{message}"
+        );
+        let closed = pre_connection_exit_message(None, &VecDeque::new());
+        assert!(
+            closed.starts_with("SSH session ended before any Waypipe client connected")
+                && !closed.contains("recent remote output"),
+            "{closed}"
+        );
+    }
+
+    #[test]
+    fn bounds_recent_remote_output_by_chunks_and_chars() {
+        let mut output = VecDeque::new();
+        for index in 0..MAX_RECENT_REMOTE_CHUNKS + 3 {
+            record_remote_output(&mut output, &format!("{index}:{}", "x".repeat(600)));
+        }
+        assert_eq!(output.len(), MAX_RECENT_REMOTE_CHUNKS);
+        assert!(output.front().unwrap().starts_with("3:"));
+        assert!(output
+            .iter()
+            .all(|chunk| chunk.chars().count() == MAX_RECENT_REMOTE_CHUNK_CHARS));
+    }
 }

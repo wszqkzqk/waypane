@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 bytes = "1"
+log = "0.4"
 russh = { version = "0.65", default-features = false, features = ["ring", "rsa"] }
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
