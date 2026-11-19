@@ -66,7 +66,7 @@ data class ConnectionProfile(
     val remoteSocket: String = "",
     val compression: String = "lz4",
     val command: String = "foot",
-    val autoResize: Boolean = false,
+    val autoResize: Boolean = true,
     val waylandScale: Int = WAYLAND_SCALE_AUTO,
 )
 
@@ -195,6 +195,10 @@ class WaypaneViewModel(application: Application) : AndroidViewModel(application)
         }
         disconnectNative()
         check(handle.compareAndSet(0L, freshHandle)) { "session handle was already started" }
+        SessionService.start(
+            getApplication(),
+            "${profile.host.trim()}:${profile.port}",
+        )
         lastClipboardText?.takeIf { it.isNotEmpty() }?.let { text ->
             runCatching { NativeBridge.nativeSetClipboardText(freshHandle, text) }
         }
@@ -418,6 +422,12 @@ class WaypaneViewModel(application: Application) : AndroidViewModel(application)
         reportError(text)
     }
 
+    fun reportSessionLost(message: String) {
+        if (handle.get() == 0L) {
+            reportError(message)
+        }
+    }
+
     fun reportError(message: String) {
         Log.w(LOG_TAG, message)
         uiState = uiState.copy(error = message, status = message, connecting = false)
@@ -437,6 +447,7 @@ class WaypaneViewModel(application: Application) : AndroidViewModel(application)
         val previous = handle.getAndSet(0L)
         if (previous != 0L) {
             NativeBridge.nativeDestroy(previous)
+            SessionService.stop(getApplication())
         }
     }
 

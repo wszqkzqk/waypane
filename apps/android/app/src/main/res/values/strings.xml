@@ -1,4 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Waypane</string>
+    <string name="session_channel_name">Active remote sessions</string>
+    <string name="session_channel_description">Keeps Wayland SSH sessions connected while Waypane is in the background.</string>
+    <string name="session_notification_title">Wayland session active</string>
+    <string name="session_notification_text">Connected to %1$s. Tap to return to your remote windows.</string>
+    <string name="session_notification_open">Open</string>
+    <string name="session_notification_disconnect">Disconnect</string>
 </resources>

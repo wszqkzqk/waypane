@@ -28,7 +28,10 @@ daemon is not required.
   actor, handle-registry/Arc JNI lifecycle, and `ANativeWindow`/`wgpu` presentation
 - `apps/android`: Kotlin/Jetpack Compose Android host with connection settings, host-key
   confirmation, private-key management, window switching, `RemoteSurfaceView`, touch, soft
-  keyboard, and clipboard integration
+  keyboard, and clipboard integration. The session-owned native handle lives in an
+  application-scoped store rather than an Activity `ViewModel`, and a `specialUse` foreground
+  `SessionService` with an ongoing Open/Disconnect notification keeps SSH sessions alive when
+  the Activity is destroyed or moved to the background
 - `vendor/waypipe`: unmodified upstream Waypipe `v0.11.3`, used as the protocol reference and
   integration-test peer
 
@@ -166,8 +169,13 @@ Wayland frame callbacks.
   so the secondary queue error cannot mask the root failure
 - Android always fits remote content without cropping, supports 1x–8x pinch zoom with panning,
   two-finger scrolling at fit, two-finger tap to toggle 2.5x focus, a Fit reset action, immersive
-  fullscreen, and keep-screen-awake during sessions. Auto-resize is opt-in on every device size;
-  zooming never resizes the remote application, and actual committed buffer sizes drive fitting
+  fullscreen, and keep-screen-awake during sessions. Auto-resize defaults to on for phone-sized
+  displays and can be disabled to preserve remote geometry; zooming never resizes the remote
+  application, and actual committed buffer sizes drive fitting
+- Android survives Home/Recents switches, task swipes, and Activity recreation without dropping
+  the SSH session or remote windows. Back or **Back** asks for confirmation before disconnecting;
+  if Android still kills the process despite the foreground service, the recreated Activity
+  explains that the previous session was reclaimed instead of silently showing Setup
 
 ## Build and test
 
@@ -274,10 +282,11 @@ Xcursor theme on that host if cursor shapes are needed; it does not affect deskt
 
 ### Android display controls
 
-By default **Auto-resize remote windows** is off. The compositor's fixed output and each client's
-own window geometry therefore stay intact, which is important for full desktops such as Weston.
-The window is fitted entirely inside the available display area without changing its aspect ratio;
-black bars are presentation-only and never become remote input.
+On Android, **Auto-resize remote windows** defaults to on so phone displays are used fully.
+Disable it in Setup or **Menu** to preserve the compositor's fixed output and each client's own
+window geometry. Without Auto-resize, the window is fitted entirely inside the available display
+area without changing its aspect ratio; black bars are presentation-only and never become remote
+input.
 
 **Wayland display scale** defaults to **Auto**, computed as `ceil(DisplayMetrics.density / 2)` and
 clamped to 1x–4x. On a 480dpi (`density = 3`) phone this selects 2x. Setup and **Menu** also offer
@@ -303,19 +312,29 @@ is active.
 - At 1x fit, where there is nothing to pan, a two-finger drag is forwarded as smooth scrolling.
 - A quick two-finger tap focuses at 2.5x around the fingers; another two-finger tap or **Fit**
   restores the complete window. Single-finger double-clicks remain ordinary remote clicks.
-- **Menu** provides Direct touch, Wayland display scale, Show keyboard, Auto-resize, Fit, fullscreen, and closing the
-  remote window. In fullscreen the
-  system bars, app bar, and window tabs are hidden and a small translucent **Menu** remains at the
-  top right; Back first leaves fullscreen and only leaves the session on a second press.
+- **Menu** provides Direct touch, Wayland display scale, Show keyboard, Auto-resize, Fit,
+  fullscreen, and closing the remote window. In fullscreen the system bars, app bar or side rail,
+  and window tabs are hidden and a small translucent **Menu** remains at the top right; Back first
+  leaves fullscreen and then asks for confirmation before disconnecting from the session.
+- Portrait uses a top app bar and a fixed-height single-line status strip. The status strip never
+  changes height when remote log lines arrive, avoiding a feedback loop where logging resized the
+  view, triggered Auto-resize, and produced more log lines. Landscape places Back, Keyboard, Fit,
+  Menu, and multi-window switching in a 72dp end-side rail that respects cutouts and system bars;
+  the remote view uses the remaining full height edge to edge, and landscape status text is shown
+  inside **Menu** instead of consuming vertical space.
+- The remote view applies `imePadding`, so opening the soft keyboard shrinks the visible view above
+  the keyboard instead of covering the remote application; with Auto-resize enabled the window
+  follows that new visible size after the debounce.
 - The screen stays awake while a session is open and the original screen-on/insets behavior is
   restored when the session closes or the UI is destroyed.
 
 Enabling **Auto-resize remote windows** sends a configure request whose window-geometry logical
 size is `ceil(available_view_pixels / effective_scale)`, so native scaling does not get canceled by
-an oversized remote window. Changing native scale while Auto-resize is active schedules an updated
-request after the same 250ms debounce. Wayland clients may ignore or adjust these requests; Waypane
-always uses the buffer size the client actually commits. Pinch zoom and pan never trigger remote
-resize requests.
+an oversized remote window. The available pixels come from `RemoteSurfaceView.onSizeChanged`
+rather than rounded density-independent dimensions. Changing native scale while Auto-resize is
+active schedules an updated request after the same 250ms debounce. Wayland clients may ignore or
+adjust these requests; Waypane always uses the buffer size the client actually commits. Pinch zoom
+and pan never trigger remote resize requests.
 
 ## Local integration testing
 

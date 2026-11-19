@@ -1,23 +1,39 @@
 package org.waypane.app
 
+import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -27,6 +43,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -37,6 +54,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.ScaffoldDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -55,15 +73,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -86,6 +105,10 @@ fun WaypaneApp(model: WaypaneViewModel) {
     val context = LocalContext.current
     val activity = context.findActivity()
     val hostView = LocalView.current
+    var confirmDisconnect by remember { mutableStateOf(false) }
+    val notificationPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) {}
 
     LaunchedEffect(state.immersive) {
         val controller = WindowCompat.getInsetsController(activity.window, hostView)
@@ -99,6 +122,13 @@ fun WaypaneApp(model: WaypaneViewModel) {
     }
     LaunchedEffect(state.screen) {
         hostView.keepScreenOn = state.screen == Screen.Session
+        val needsNotificationPermission = state.screen == Screen.Session &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        if (needsNotificationPermission) {
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
     }
     DisposableEffect(activity, hostView) {
         onDispose {
@@ -110,14 +140,52 @@ fun WaypaneApp(model: WaypaneViewModel) {
     }
 
     BackHandler(enabled = state.screen == Screen.Session) {
-        if (state.immersive) model.exitImmersive() else model.returnToSetup()
+        if (state.immersive) model.exitImmersive() else confirmDisconnect = true
     }
     when (state.screen) {
         Screen.Setup -> SetupScreen(model)
-        Screen.Session -> SessionScreen(model, state)
+        Screen.Session -> SessionScreen(
+            model = model,
+            state = state,
+            onRequestDisconnect = { confirmDisconnect = true },
+        )
     }
     state.hostKeyPrompt?.let { prompt ->
         HostKeyDialog(prompt, onTrust = model::trustHostKey, onReject = model::rejectHostKey)
+    }
+    if (confirmDisconnect && state.screen == Screen.Session) {
+        val connecting = state.connecting && state.activeSessions.isEmpty()
+        AlertDialog(
+            onDismissRequest = { confirmDisconnect = false },
+            title = { Text(if (connecting) "Cancel connection attempt?" else "Disconnect from remote session?") },
+            text = {
+                Text(
+                    if (connecting) {
+                        "This stops the SSH connection attempt."
+                    } else {
+                        "This closes the SSH connection and all remote windows. To keep the session running while using other apps, leave Waypane with the Home or Recents button instead."
+                    },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmDisconnect = false
+                        model.returnToSetup()
+                    },
+                ) {
+                    Text(
+                        if (connecting) "Stop connecting" else "Disconnect",
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDisconnect = false }) {
+                    Text(if (connecting) "Keep waiting" else "Keep session")
+                }
+            },
+        )
     }
 }
 
@@ -196,7 +264,7 @@ private fun SetupScreen(model: WaypaneViewModel) {
     var compression by rememberSaveable { mutableStateOf("lz4") }
     var identity by rememberSaveable { mutableStateOf(model.importedKeyPath()) }
     var remoteSocket by rememberSaveable { mutableStateOf("") }
-    var autoResize by rememberSaveable { mutableStateOf(false) }
+    var autoResize by rememberSaveable { mutableStateOf(true) }
     var waylandScale by rememberSaveable { mutableStateOf(WAYLAND_SCALE_AUTO) }
     var authentication by rememberSaveable {
         mutableStateOf(if (identity.isBlank()) AuthenticationMode.Password else AuthenticationMode.PrivateKey)
@@ -476,54 +544,161 @@ private fun HostKeyDialog(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SessionScreen(model: WaypaneViewModel, state: UiState) {
-    val density = LocalDensity.current.density
+private fun SessionTopBar(
+    title: String,
+    hasWindow: Boolean,
+    onBack: () -> Unit,
+    onShowKeyboard: () -> Unit,
+    onFit: () -> Unit,
+    onOpenMenu: () -> Unit,
+) {
+    TopAppBar(
+        navigationIcon = {
+            IconButton(onClick = onBack) { Text("Back") }
+        },
+        title = {
+            Text(
+                title,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        },
+        actions = {
+            if (hasWindow) {
+                TextButton(onClick = onShowKeyboard) { Text("Keyboard") }
+                TextButton(onClick = onFit) { Text("Fit") }
+                TextButton(onClick = onOpenMenu) { Text("Menu") }
+            }
+        },
+    )
+}
+
+@Composable
+private fun RailAction(label: String, onClick: () -> Unit) {
+    TextButton(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
+    ) {
+        Text(label, maxLines = 1, style = MaterialTheme.typography.labelMedium)
+    }
+}
+
+@Composable
+private fun SessionSideRail(
+    windows: List<AndroidWindow>,
+    selected: SurfaceKey?,
+    hasWindow: Boolean,
+    onBack: () -> Unit,
+    onSelectWindow: (SurfaceKey) -> Unit,
+    onShowKeyboard: () -> Unit,
+    onFit: () -> Unit,
+    onOpenMenu: () -> Unit,
+) {
+    val hardwareInsets = WindowInsets.systemBars.union(WindowInsets.displayCutout)
+    Column(
+        modifier = Modifier
+            .fillMaxHeight()
+            .width(72.dp)
+            .background(MaterialTheme.colorScheme.surface)
+            .windowInsetsPadding(hardwareInsets.only(WindowInsetsSides.End + WindowInsetsSides.Vertical)),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        RailAction("Back", onBack)
+        if (hasWindow) {
+            RailAction("Keys", onShowKeyboard)
+            RailAction("Fit", onFit)
+            RailAction("Menu", onOpenMenu)
+        }
+        if (windows.size > 1) {
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth().weight(1f).padding(top = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                items(windows, key = { it.key }) { window ->
+                    TextButton(
+                        onClick = { onSelectWindow(window.key) },
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                        contentPadding = PaddingValues(4.dp),
+                        colors = ButtonDefaults.textButtonColors(
+                            containerColor = if (window.key == selected) {
+                                MaterialTheme.colorScheme.surfaceVariant
+                            } else {
+                                Color.Transparent
+                            },
+                        ),
+                    ) {
+                        Text(
+                            "${window.key.window} ${window.displayTitle}",
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SessionScreen(
+    model: WaypaneViewModel,
+    state: UiState,
+    onRequestDisconnect: () -> Unit,
+) {
     val context = LocalContext.current
     val configuration = LocalConfiguration.current
+    val landscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     val selected = state.selected
     val selectedWindow = selected?.let(model.windows::get)
+    val orderedWindows = model.windows.values.sortedWith(compareBy({ it.key.session }, { it.key.window }))
     val nativeScale = remember(state.waylandScale, configuration, context) {
         context.resolveWaylandScale(state.waylandScale)
     }
     var showWindowMenu by remember(selected) { mutableStateOf(false) }
     var surfaceView by remember(selected) { mutableStateOf<RemoteSurfaceView?>(null) }
+    var viewSize by remember(selected) { mutableStateOf(IntSize.Zero) }
 
     LaunchedEffect(nativeScale) {
         model.applyWaylandScale(nativeScale)
     }
+    if (state.autoResize && selected != null && viewSize.width > 0 && viewSize.height > 0) {
+        LaunchedEffect(selected, viewSize, nativeScale) {
+            delay(250)
+            model.resizeWindow(selected, viewSize.width, viewSize.height)
+        }
+    }
+    val showKeyboard: () -> Unit = { surfaceView?.showKeyboard() }
+    val fit: () -> Unit = { surfaceView?.resetViewport() }
+    val openMenu: () -> Unit = { showWindowMenu = true }
     Scaffold(
         topBar = {
-            if (!state.immersive) {
-                TopAppBar(
-                    navigationIcon = {
-                        IconButton(onClick = model::returnToSetup) { Text("Back") }
-                    },
-                    title = {
-                        Text(
-                            selectedWindow?.displayTitle ?: "Waypane",
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    },
-                    actions = {
-                        if (selectedWindow != null) {
-                            TextButton(onClick = { surfaceView?.showKeyboard() }) { Text("Keyboard") }
-                            TextButton(onClick = { surfaceView?.resetViewport() }) { Text("Fit") }
-                            TextButton(onClick = { showWindowMenu = true }) { Text("Menu") }
-                        }
-                    },
+            if (!state.immersive && !landscape) {
+                SessionTopBar(
+                    title = selectedWindow?.displayTitle ?: "Waypane",
+                    hasWindow = selectedWindow != null,
+                    onBack = onRequestDisconnect,
+                    onShowKeyboard = showKeyboard,
+                    onFit = fit,
+                    onOpenMenu = openMenu,
                 )
             }
+        },
+        contentWindowInsets = if (landscape) {
+            WindowInsets(0, 0, 0, 0)
+        } else {
+            ScaffoldDefaults.contentWindowInsets
         },
         containerColor = Color.Black,
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
-            if (!state.immersive && model.windows.size > 1) {
+            if (!state.immersive && !landscape && orderedWindows.size > 1) {
                 LazyRow(
                     modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface).padding(4.dp),
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    items(model.windows.values.sortedWith(compareBy({ it.key.session }, { it.key.window })), key = { it.key }) { window ->
+                    items(orderedWindows, key = { it.key }) { window ->
                         FilterChip(
                             selected = window.key == selected,
                             onClick = { model.selectWindow(window.key) },
@@ -532,97 +707,117 @@ private fun SessionScreen(model: WaypaneViewModel, state: UiState) {
                     }
                 }
             }
-            BoxWithConstraints(Modifier.weight(1f).fillMaxWidth().background(Color.Black)) {
-                val ratio = selectedWindow?.aspectRatio
-                if (selected != null && selectedWindow != null) {
-                    key(selected) {
-                        AndroidView(
-                            factory = { context ->
-                                RemoteSurfaceView(
-                                    context = context,
-                                    key = selected,
-                                    contentAspectRatio = ratio ?: 1f,
-                                    nativeHandle = model::nativeHandle,
-                                    onUnsupportedText = { text -> model.reportUnsupportedText(text) },
-                                    onError = model::reportError,
-                                ).also { surfaceView = it }
-                            },
-                            update = { view ->
-                                view.setDirectTouch(state.directTouch)
-                                view.updateContentAspectRatio(ratio ?: 1f)
-                                surfaceView = view
-                            },
-                            onRelease = { view ->
-                                if (surfaceView === view) surfaceView = null
-                            },
-                            modifier = Modifier.fillMaxSize(),
-                        )
-                    }
-                    if (state.autoResize) {
-                        LaunchedEffect(selected, maxWidth, maxHeight, nativeScale) {
-                            delay(250)
-                            model.resizeWindow(
-                                selected,
-                                (maxWidth.value * density).toInt().coerceAtLeast(1),
-                                (maxHeight.value * density).toInt().coerceAtLeast(1),
+            Row(Modifier.weight(1f).fillMaxWidth().imePadding()) {
+                Box(Modifier.weight(1f).fillMaxHeight().background(Color.Black)) {
+                    val ratio = selectedWindow?.aspectRatio
+                    if (selected != null && selectedWindow != null) {
+                        key(selected) {
+                            AndroidView(
+                                factory = { context ->
+                                    RemoteSurfaceView(
+                                        context = context,
+                                        key = selected,
+                                        contentAspectRatio = ratio ?: 1f,
+                                        nativeHandle = model::nativeHandle,
+                                        onUnsupportedText = { text -> model.reportUnsupportedText(text) },
+                                        onError = model::reportError,
+                                        onViewSizeChanged = { width, height ->
+                                            viewSize = IntSize(width, height)
+                                        },
+                                    ).also { surfaceView = it }
+                                },
+                                update = { view ->
+                                    view.setDirectTouch(state.directTouch)
+                                    view.updateContentAspectRatio(ratio ?: 1f)
+                                    surfaceView = view
+                                },
+                                onRelease = { view ->
+                                    if (surfaceView === view) surfaceView = null
+                                },
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        }
+                    } else {
+                        Column(
+                            Modifier.fillMaxSize(),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center,
+                        ) {
+                            if (state.connecting || state.activeSessions.isNotEmpty()) {
+                                CircularProgressIndicator()
+                                Spacer(Modifier.height(16.dp))
+                            }
+                            Text(
+                                when {
+                                    state.hostKeyPrompt != null -> "Waiting for host key confirmation"
+                                    state.connecting -> "Connecting over SSH…"
+                                    state.activeSessions.isEmpty() -> "No remote windows"
+                                    else -> "Waiting for Wayland surfaces…"
+                                },
+                                color = Color.White,
                             )
                         }
                     }
-                } else {
-                    Column(
-                        Modifier.fillMaxSize(),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center,
-                    ) {
-                        if (state.connecting || state.activeSessions.isNotEmpty()) {
-                            CircularProgressIndicator()
-                            Spacer(Modifier.height(16.dp))
+                    if (state.immersive && selectedWindow != null) {
+                        Row(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(8.dp)
+                                .background(Color.Black.copy(alpha = 0.6f), MaterialTheme.shapes.small),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            TextButton(onClick = showKeyboard) {
+                                Text("Keyboard", color = Color.White)
+                            }
+                            TextButton(onClick = openMenu) {
+                                Text("Menu", color = Color.White)
+                            }
                         }
-                        Text(
-                            when {
-                                state.hostKeyPrompt != null -> "Waiting for host key confirmation"
-                                state.connecting -> "Connecting over SSH…"
-                                state.activeSessions.isEmpty() -> "No remote windows"
-                                else -> "Waiting for Wayland surfaces…"
-                            },
-                            color = Color.White,
-                        )
                     }
                 }
-                if (state.immersive && selectedWindow != null) {
-                    Row(
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .padding(8.dp)
-                            .background(Color.Black.copy(alpha = 0.6f), MaterialTheme.shapes.small),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        TextButton(onClick = { surfaceView?.showKeyboard() }) {
-                            Text("Keyboard", color = Color.White)
-                        }
-                        TextButton(onClick = { showWindowMenu = true }) {
-                            Text("Menu", color = Color.White)
-                        }
-                    }
+                if (!state.immersive && landscape) {
+                    SessionSideRail(
+                        windows = orderedWindows,
+                        selected = selected,
+                        hasWindow = selectedWindow != null,
+                        onBack = onRequestDisconnect,
+                        onSelectWindow = model::selectWindow,
+                        onShowKeyboard = showKeyboard,
+                        onFit = fit,
+                        onOpenMenu = openMenu,
+                    )
                 }
             }
             state.error?.let { message ->
-                ErrorCard(message, model::clearError)
-            }
-            if (!state.immersive && state.status.isNotBlank()) {
-                Text(
-                    state.status,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface).padding(8.dp),
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
+                ErrorCard(
+                    message = message,
+                    onDismiss = model::clearError,
+                    modifier = if (landscape) Modifier.navigationBarsPadding() else Modifier,
                 )
+            }
+            if (!state.immersive && !landscape) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(40.dp)
+                        .background(MaterialTheme.colorScheme.surface)
+                        .padding(horizontal = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        state.status,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         }
     }
     if (selected != null && showWindowMenu) {
         WindowOptionsDialog(
+            status = state.status,
             autoResize = state.autoResize,
             directTouch = state.directTouch,
             waylandScale = state.waylandScale,
@@ -641,6 +836,7 @@ private fun SessionScreen(model: WaypaneViewModel, state: UiState) {
 
 @Composable
 private fun WindowOptionsDialog(
+    status: String,
     autoResize: Boolean,
     directTouch: Boolean,
     waylandScale: Int,
@@ -662,6 +858,13 @@ private fun WindowOptionsDialog(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
+                if (status.isNotBlank()) {
+                    Text(
+                        status,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 SettingSwitch(
                     title = "Auto-resize remote windows",
                     description = "Ask the application to match the display area instead of preserving its own geometry.",
@@ -723,10 +926,14 @@ private fun WindowOptionsDialog(
 }
 
 @Composable
-private fun ErrorCard(message: String, onDismiss: () -> Unit) {
+private fun ErrorCard(
+    message: String,
+    modifier: Modifier = Modifier,
+    onDismiss: () -> Unit,
+) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
-        modifier = Modifier.fillMaxWidth().padding(8.dp),
+        modifier = modifier.fillMaxWidth().padding(8.dp),
     ) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             SelectionContainer {

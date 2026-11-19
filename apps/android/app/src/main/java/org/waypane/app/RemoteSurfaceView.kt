@@ -30,6 +30,7 @@ class RemoteSurfaceView(
     private val nativeHandle: () -> Long,
     private val onUnsupportedText: (String) -> Unit = {},
     private val onError: (String) -> Unit = {},
+    private val onViewSizeChanged: (Int, Int) -> Unit = { _, _ -> },
 ) : SurfaceView(context), SurfaceHolder.Callback, Choreographer.FrameCallback {
 
     @Volatile
@@ -131,6 +132,13 @@ class RemoteSurfaceView(
                 }
             }
             if (attached) requestRenderIfDirty()
+        }
+    }
+
+    override fun onSizeChanged(width: Int, height: Int, oldWidth: Int, oldHeight: Int) {
+        super.onSizeChanged(width, height, oldWidth, oldHeight)
+        if (width > 0 && height > 0) {
+            onViewSizeChanged(width, height)
         }
     }
 
