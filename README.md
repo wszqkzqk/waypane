@@ -58,7 +58,8 @@ and static content does not run a 60 Hz polling loop.
 - Subsurface `place_above`/`place_below`, `set_sync`/`set_desync`, synchronized parent
   caches, z-order composition, and popup/subsurface hit testing
 - Toplevel and popup native windows, maximize/fullscreen/minimize, interactive resize, and
-  drag requests
+  drag requests; empty initial xdg-surface commits are allowed before `ack_configure`, while
+  real buffer attachments remain gated by the initial ack
 - Keyboard focus/keymap/modifiers, pointer enter/motion/buttons, `axis`/`axis_value120`, and
   touch events
 - Frame backpressure: `wl_buffer.release` and `wl_callback.done` are sent after the associated
