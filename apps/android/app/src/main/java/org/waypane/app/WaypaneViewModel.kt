@@ -215,6 +215,11 @@ class WaypaneViewModel(application: Application) : AndroidViewModel(application)
 
     private fun applyEvent(event: EngineEvent) {
         when (event) {
+            is EngineEvent.Negotiated -> {
+                val message = "Connected to Waypipe protocol 0x${event.version.toString(16)} (server 0x${event.remoteVersion.toString(16)}); waiting for Wayland surfaces"
+                Log.i(LOG_TAG, message)
+                uiState = uiState.copy(status = message)
+            }
             is EngineEvent.Connected -> {
                 uiState = uiState.copy(
                     status = "Connected to SSH; waiting for Wayland surfaces",

@@ -31,6 +31,10 @@ pub struct AndroidWindow {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EngineEvent {
+    Negotiated {
+        remote_version: u32,
+        version: u32,
+    },
     Connected {
         session: SessionId,
     },
@@ -773,6 +777,15 @@ impl AndroidEngine {
                                 .push(EngineEvent::WindowUpsert(window.clone()));
                         }
                     }
+                }
+                CoreEvent::Negotiated {
+                    remote_version,
+                    version,
+                } => {
+                    output.events.push(EngineEvent::Negotiated {
+                        remote_version,
+                        version,
+                    });
                 }
                 CoreEvent::ClipboardChanged { source, mime_types } => {
                     if let Some(_source_id) = source {

@@ -39,7 +39,14 @@ impl Connection {
         let mut events = Vec::new();
         for event in batch.events {
             match event {
-                ClientEvent::Negotiated { .. } | ClientEvent::ShmUpdated { .. } => {}
+                ClientEvent::Negotiated {
+                    remote_version,
+                    version,
+                } => events.push(CoreEvent::Negotiated {
+                    remote_version,
+                    version,
+                }),
+                ClientEvent::ShmUpdated { .. } => {}
                 ClientEvent::ShmOpened { .. } | ClientEvent::ShmExtended { .. } => {}
                 ClientEvent::PipeOpened { rid, .. } | ClientEvent::PipeUpdated { rid } => {
                     events.extend(self.compositor.process_pipe(&mut self.client, rid)?);

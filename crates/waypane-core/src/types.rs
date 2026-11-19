@@ -82,6 +82,10 @@ pub struct Frame {
 
 #[derive(Debug, Clone)]
 pub enum CoreEvent {
+    Negotiated {
+        remote_version: u32,
+        version: u32,
+    },
     WindowCreated(WindowInfo),
     WindowMetadata {
         id: WindowId,

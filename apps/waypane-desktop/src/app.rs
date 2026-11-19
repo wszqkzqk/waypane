@@ -112,6 +112,12 @@ impl App {
         let mut clipboard_cleared = false;
         for event in batch.events {
             match event {
+                CoreEvent::Negotiated {
+                    remote_version,
+                    version,
+                } => log::info!(
+                    "session {session} negotiated Waypipe protocol {version:#x} (server {remote_version:#x})"
+                ),
                 CoreEvent::WindowCreated(info) => renderer.window_created(session, info),
                 CoreEvent::WindowMetadata {
                     id,

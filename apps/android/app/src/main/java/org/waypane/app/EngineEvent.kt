@@ -33,6 +33,13 @@ data class AndroidWindow(
 @Serializable
 sealed interface EngineEvent {
     @Serializable
+    @SerialName("negotiated")
+    data class Negotiated(
+        @SerialName("remote_version") val remoteVersion: Long,
+        val version: Long,
+    ) : EngineEvent
+
+    @Serializable
     @SerialName("connected")
     data class Connected(val session: Long) : EngineEvent
 
