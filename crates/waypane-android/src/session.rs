@@ -170,11 +170,17 @@ async fn run_actor(
     let mut remote_exited = false;
     let mut accepted_any = false;
     let mut exit_status = None;
+    let mut exit_stderr = None;
 
     loop {
         if remote_exited && lock(&routes).is_empty() {
             if !accepted_any {
-                let message = pre_connection_exit_message(exit_status);
+                let message = pre_connection_exit_message(
+                    &remote.binary,
+                    &remote.command,
+                    exit_status,
+                    exit_stderr.as_deref(),
+                );
                 let _ = events.send(EngineEvent::Error {
                     session: None,
                     message,
@@ -202,11 +208,12 @@ async fn run_actor(
                         message: String::from_utf8_lossy(&data).into_owned(),
                     });
                 }
-                Some(CommandEvent::ExitStatus(status)) => {
+                Some(CommandEvent::ExitStatus { status, stderr }) => {
                     let _ = events.send(EngineEvent::Status {
                         message: format!("remote command exited: {status:?}"),
                     });
                     exit_status = Some(status);
+                    exit_stderr = stderr.map(|data| String::from_utf8_lossy(&data).into_owned());
                     remote_exited = true;
                 }
                 None => {
@@ -288,12 +295,29 @@ async fn run_actor(
     }
 }
 
-fn pre_connection_exit_message(status: Option<Option<u32>>) -> String {
-    match status {
-        Some(status) => format!(
-            "remote command exited with status {status:?} before any Waypipe client connected; verify that `waypipe` is installed and the application command exists on the host"
+fn pre_connection_exit_message(
+    binary: &str,
+    command: &[String],
+    status: Option<Option<u32>>,
+    stderr: Option<&str>,
+) -> String {
+    let command = command.join(" ");
+    let reason = match status {
+        Some(Some(code)) => format!(
+            "`{binary} server -- {command}` exited with code {code} before any Waypipe client connected"
         ),
-        None => "SSH session ended before any Waypipe client connected".to_string(),
+        Some(None) => format!(
+            "`{binary} server -- {command}` exited before any Waypipe client connected"
+        ),
+        None => format!(
+            "SSH session ended before any Waypipe client connected while starting `{binary} server -- {command}`"
+        ),
+    };
+    match stderr.map(str::trim).filter(|stderr| !stderr.is_empty()) {
+        Some(stderr) => format!("{reason}:\n{stderr}"),
+        None => format!(
+            "{reason}. Check that `{binary}` is installed and the application command exists on the host"
+        ),
     }
 }
 
@@ -402,12 +426,24 @@ mod tests {
 
     #[test]
     fn reports_remote_exit_before_first_waypipe_stream() {
-        assert!(pre_connection_exit_message(Some(Some(127))).contains(
-            "remote command exited with status Some(127) before any Waypipe client connected"
-        ));
+        let command = vec!["foot".to_string()];
+        let message = pre_connection_exit_message(
+            "waypipe",
+            &command,
+            Some(Some(127)),
+            Some("sh: 1: exec: foot: not found\n"),
+        );
         assert_eq!(
-            pre_connection_exit_message(None),
-            "SSH session ended before any Waypipe client connected"
+            message,
+            "`waypipe server -- foot` exited with code 127 before any Waypipe client connected:\nsh: 1: exec: foot: not found"
+        );
+        assert!(!message.contains("Some(127)"));
+        let silent = pre_connection_exit_message("waypipe", &command, Some(None), None);
+        assert!(silent.contains("exited before any Waypipe client connected"));
+        assert!(silent.contains("Check that `waypipe` is installed"));
+        assert_eq!(
+            pre_connection_exit_message("waypipe", &command, None, None),
+            "SSH session ended before any Waypipe client connected while starting `waypipe server -- foot`. Check that `waypipe` is installed and the application command exists on the host"
         );
     }
 }

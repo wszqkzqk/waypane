@@ -18,7 +18,8 @@ daemon is not required.
 - `crates/waypane-transport`: `russh` authentication, SHA-256 host-key verification and TOFU,
   OpenSSH `streamlocal` forwarding, remote temporary-directory discovery, and automatic
   `waypipe server` startup; if the remote command exits before the first Waypipe stream is
-  accepted, Android reports an error instead of leaving `Connecting over SSH…` running indefinitely
+  accepted, Android reports the command, human-readable exit code (when available), and up to
+  4 KiB of trailing remote stderr instead of leaving `Connecting over SSH…` running indefinitely
 - `crates/waypane-render`: damage-aware software layer composition and `wgpu` textures; the
   `desktop` feature adds `winit` native windows
 - `apps/waypane-desktop`: desktop CLI, multi-session routing, native windows, input, and

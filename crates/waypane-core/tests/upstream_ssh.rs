@@ -341,7 +341,7 @@ async fn connects_waypipe_through_sshd_with_tofu_and_termux_tmpdir() {
             event = events.recv() => match event {
                 Some(CommandEvent::Stdout(data)) => remote_stdout.push_str(&String::from_utf8_lossy(&data)),
                 Some(CommandEvent::Stderr(data)) => remote_stderr.push_str(&String::from_utf8_lossy(&data)),
-                Some(CommandEvent::ExitStatus(status)) => panic!(
+                Some(CommandEvent::ExitStatus { status, .. }) => panic!(
                     "Waypipe exited with {status:?} before connecting; stdout: {remote_stdout}; stderr: {remote_stderr}; sshd log: {}",
                     fs::read_to_string(server.root.join("sshd.log")).unwrap_or_default()
                 ),
@@ -362,7 +362,7 @@ async fn connects_waypipe_through_sshd_with_tofu_and_termux_tmpdir() {
         match event {
             CommandEvent::Stdout(data) => remote_stdout.push_str(&String::from_utf8_lossy(&data)),
             CommandEvent::Stderr(data) => remote_stderr.push_str(&String::from_utf8_lossy(&data)),
-            CommandEvent::ExitStatus(status) => {
+            CommandEvent::ExitStatus { status, .. } => {
                 exit_status = status;
                 break;
             }

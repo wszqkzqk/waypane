@@ -16,6 +16,7 @@ use crate::remote::{RemoteSocket, RemoteWaypipe, MAX_REMOTE_SOCKET_BYTES};
 
 const REMOTE_DIRECTORY_COMMAND: &str = "if [ -n \"${TMPDIR:-}\" ] && [ -d \"$TMPDIR\" ] && [ -w \"$TMPDIR\" ]; then printf %s \"$TMPDIR\"; elif [ -n \"${XDG_RUNTIME_DIR:-}\" ] && [ -d \"$XDG_RUNTIME_DIR\" ] && [ -w \"$XDG_RUNTIME_DIR\" ]; then printf %s \"$XDG_RUNTIME_DIR\"; elif [ -d /tmp ] && [ -w /tmp ]; then printf %s /tmp; else exit 3; fi";
 const MAX_KNOWN_HOSTS_BYTES: usize = 4 * 1024 * 1024;
+const MAX_COMMAND_STDERR_BYTES: usize = 4096;
 
 #[derive(Debug, Clone)]
 pub enum Authentication {
@@ -130,7 +131,10 @@ pub struct SshConfig {
 pub enum CommandEvent {
     Stdout(Vec<u8>),
     Stderr(Vec<u8>),
-    ExitStatus(Option<u32>),
+    ExitStatus {
+        status: Option<u32>,
+        stderr: Option<Vec<u8>>,
+    },
 }
 
 struct SshHandler {
@@ -712,10 +716,14 @@ fn watch_remote_command(mut channel: Channel<Msg>) -> mpsc::Receiver<CommandEven
     let (sender, receiver) = mpsc::channel(32);
     tokio::spawn(async move {
         let mut status = None;
+        let mut stderr = Vec::new();
         while let Some(message) = channel.wait().await {
             let event = match message {
                 ChannelMsg::Data { data } => CommandEvent::Stdout(data.to_vec()),
-                ChannelMsg::ExtendedData { data, .. } => CommandEvent::Stderr(data.to_vec()),
+                ChannelMsg::ExtendedData { data, .. } => {
+                    append_stderr_tail(&mut stderr, &data);
+                    CommandEvent::Stderr(data.to_vec())
+                }
                 ChannelMsg::ExitStatus { exit_status } => {
                     status = Some(exit_status);
                     continue;
@@ -728,9 +736,20 @@ fn watch_remote_command(mut channel: Channel<Msg>) -> mpsc::Receiver<CommandEven
                 return;
             }
         }
-        let _ = sender.send(CommandEvent::ExitStatus(status)).await;
+        let stderr = (!stderr.is_empty()).then_some(stderr);
+        let _ = sender
+            .send(CommandEvent::ExitStatus { status, stderr })
+            .await;
     });
     receiver
+}
+
+fn append_stderr_tail(tail: &mut Vec<u8>, data: &[u8]) {
+    tail.extend_from_slice(data);
+    let excess = tail.len().saturating_sub(MAX_COMMAND_STDERR_BYTES);
+    if excess > 0 {
+        tail.drain(..excess);
+    }
 }
 
 #[cfg(unix)]
@@ -884,6 +903,14 @@ mod tests {
         );
         assert!(result.unwrap_err().to_string().contains("cancelled"));
         assert!(!channel.is_pending());
+    }
+
+    #[test]
+    fn bounds_remote_stderr_tail() {
+        let mut tail = vec![1, 2];
+        append_stderr_tail(&mut tail, &vec![0u8; MAX_COMMAND_STDERR_BYTES]);
+        assert_eq!(tail.len(), MAX_COMMAND_STDERR_BYTES);
+        assert!(tail.iter().all(|byte| *byte == 0));
     }
 
     #[test]

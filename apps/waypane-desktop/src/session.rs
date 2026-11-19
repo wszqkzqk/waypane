@@ -161,9 +161,13 @@ async fn run(
                                     CommandEvent::Stdout(data) | CommandEvent::Stderr(data) => {
                                         String::from_utf8_lossy(&data).into_owned()
                                     }
-                                    CommandEvent::ExitStatus(status) => {
-                                        format!("remote command exited: {status:?}")
-                                    }
+                                    CommandEvent::ExitStatus { status, stderr } => match stderr {
+                                        Some(stderr) if !stderr.is_empty() => format!(
+                                            "remote command exited: {status:?}: {}",
+                                            String::from_utf8_lossy(&stderr)
+                                        ),
+                                        _ => format!("remote command exited: {status:?}"),
+                                    },
                                 };
                                 send_proxy(&proxy, SessionEvent::Output(message));
                             }
