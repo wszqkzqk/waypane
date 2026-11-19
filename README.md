@@ -105,6 +105,19 @@ Wayland frame callbacks.
   `axis`/`axis_value120`, and touch events. A host test enumerates every non-destructor request in
   the generated official XML interfaces at the advertised versions and rejects missing or stale
   routing policies
+- Native integer Wayland scaling through `wl_output.scale` and `wl_surface.preferred_buffer_scale`
+  (v6). New surfaces inherit their window/output preference, while popups and subsurfaces inherit
+  the nearest window override without changing sibling windows. Runtime changes notify existing
+  surfaces and bound outputs, including an explicit scale of 1 when returning from HiDPI
+- Android offers **Auto** (`ceil(displayMetrics.density / 2)`, clamped to 1x–4x) plus manual
+  1x–4x selections in Setup and the window menu. Auto follows display configuration changes without
+  reconnecting. Auto-resize converts physical View pixels to window-geometry logical units using
+  `ceil(px / effective_scale)`, then the GPU continues fitting the client's actual committed buffer
+- Desktop uses each native window's `ceil(Window::scale_factor())` as a per-window
+  `preferred_buffer_scale` when the window is created and after `Resized`/`ScaleFactorChanged`.
+  High-resolution buffers are presented into the existing host logical geometry, so 125%/150% and
+  other fractional system scales preserve layout while glyphs are rendered at a higher integer
+  buffer scale instead of being blurred by a 1x upscale
 - Android uses pointer-emulating touch by default: tap sends a left click, drag sends a left-button
   drag, and long-press sends a right click. A window-menu switch selects native Direct touch
   instead without delivering both protocols. Pointer presses set keyboard focus, and tracked
@@ -266,6 +279,14 @@ own window geometry therefore stay intact, which is important for full desktops 
 The window is fitted entirely inside the available display area without changing its aspect ratio;
 black bars are presentation-only and never become remote input.
 
+**Wayland display scale** defaults to **Auto**, computed as `ceil(DisplayMetrics.density / 2)` and
+clamped to 1x–4x. On a 480dpi (`density = 3`) phone this selects 2x. Setup and **Menu** also offer
+manual 1x–4x choices. Native scale drives `wl_output.scale` and
+`wl_surface.preferred_buffer_scale`, changing how remote applications lay out and size text and
+controls; pinch zoom remains a separate presentation transform. Selecting Auto in the window menu
+recomputes from the current display metrics, and configuration changes re-synchronize while Auto
+is active.
+
 - By default, one finger emulates a pointer at the touched position: a quick tap sends a left
   click, moving beyond the touch slop starts a left-button drag at the original point, and a
   stationary long-press sends a right click. This works with traditional Wayland applications
@@ -282,17 +303,19 @@ black bars are presentation-only and never become remote input.
 - At 1x fit, where there is nothing to pan, a two-finger drag is forwarded as smooth scrolling.
 - A quick two-finger tap focuses at 2.5x around the fingers; another two-finger tap or **Fit**
   restores the complete window. Single-finger double-clicks remain ordinary remote clicks.
-- **Menu** provides Direct touch, Show keyboard, Auto-resize, Fit, fullscreen, and closing the
+- **Menu** provides Direct touch, Wayland display scale, Show keyboard, Auto-resize, Fit, fullscreen, and closing the
   remote window. In fullscreen the
   system bars, app bar, and window tabs are hidden and a small translucent **Menu** remains at the
   top right; Back first leaves fullscreen and only leaves the session on a second press.
 - The screen stays awake while a session is open and the original screen-on/insets behavior is
   restored when the session closes or the UI is destroyed.
 
-Enabling **Auto-resize remote windows** sends a configure request matching the available display
-area (in physical pixels, matching the currently advertised Wayland output scale of 1). Wayland
-clients may ignore or adjust that request; Waypane always uses the buffer size the client actually
-commits. Pinch zoom and pan never trigger remote resize requests.
+Enabling **Auto-resize remote windows** sends a configure request whose window-geometry logical
+size is `ceil(available_view_pixels / effective_scale)`, so native scaling does not get canceled by
+an oversized remote window. Changing native scale while Auto-resize is active schedules an updated
+request after the same 250ms debounce. Wayland clients may ignore or adjust these requests; Waypane
+always uses the buffer size the client actually commits. Pinch zoom and pan never trigger remote
+resize requests.
 
 ## Local integration testing
 
@@ -321,22 +344,21 @@ window is not counted as presented.
   automated run of the current code reached frame upload and `RedrawRequested`, but AppKit
   reported the 64x64 CLI-created window as `Occluded`, so that run did not claim a new on-screen
   presentation.
-- GitHub Actions runs `44484669930` and `44511091280` passed formatting/Clippy, all upstream
-  Waypipe integration tests, native Windows and macOS checks/tests/release builds, and complete
-  Android APK builds with JDK 25, Gradle 9.9.1, AGP 9.5.1, Kotlin 2.4.21, SDK 37.2, and NDK
-  30.0.16248370. Run `44484669930` includes `wl_data_offer.accept`, `set_cursor` with the actual
-  latest pointer-enter serial, and 16-byte evdev 42 keyboard payloads; run `44504250631` also
-  passed for the dedicated Android Keyboard button.
+- GitHub Actions runs `44484669930`, `44513696621`, and `44524897577` passed formatting/Clippy,
+  all upstream Waypipe integration tests, native Windows and macOS checks/tests/release builds,
+  and complete Android APK builds with JDK 25, Gradle 9.9.1, AGP 9.5.1, Kotlin 2.4.21, SDK 37.2,
+  and NDK 30.0.16248370. Run `44484669930` includes `wl_data_offer.accept`, `set_cursor` with the
+  actual latest pointer-enter serial, and 16-byte evdev 42 keyboard payloads; run `44524897577`
+  includes command and stderr reporting for a remote command that exits before the first stream.
 - CI-produced APKs containing `lib/arm64-v8a/libwaypane_android.so` were installed on a physical
   Xiaomi Android 16 device with a Mali-G610 GPU. They negotiated RGBA8 with Vulkan, connected to
-  Termux Waypipe 0.11.3 over an imported encrypted RSA key, presented Weston frames, and
-  reconfigured surfaces across portrait, landscape, and immersive sizes without GPU validation
-  errors. Interactive testing exposed non-resizing layer allocations and missing
-  `wl_pointer.set_cursor`; those were subsequently fixed. On-device Auto-resize then revealed an
-  asynchronous `BufferDiff` for RID 3 after premature local closure by `wl_shm_pool` teardown. The
-  resulting transport-lifetime SHM fix passes the host workspace and Clippy, including a true
-  post-retirement diff regression test, but still requires a new CI and device run before its
-  runtime behavior is considered verified.
+  Termux Waypipe 0.11.3 over an imported encrypted RSA key, and presented Weston frames across
+  portrait, landscape, and immersive sizes. Device testing also confirmed readable `waypipe server
+  -- <command>` errors with the command's own stderr, while `weston` with Auto-resize no longer
+  reports `missing pool`, layer-allocation panics, or `UnknownRid` after retiring its old SHM
+  pools. The native integer scaling feature documented above was added after run `44524897577`;
+  its Kotlin APK build and on-screen Auto/1x/2x/3x behavior require a new CI and device run
+  before being described as device-verified.
 - The Windows desktop binary has not been launched on a physical Windows device, so its
   interactive GUI, input, clipboard, and lifecycle behavior remain runtime-unverified.
 
@@ -355,9 +377,11 @@ window is not counted as presented.
   do include `axis_value120` when supported.
 - Desktop keeps the native OS cursor instead of compositing remote `set_cursor` images; custom
   cursor textures are currently composited only on Android.
-- Optional globals that Waypane does not advertise (for example fractional-scale, viewporter,
-  pointer constraints, tablet, Xwayland shell, and DMABUF protocols) fall back on the client's own
-  non-extension path and are not presented as implemented capabilities.
+- `wp_fractional_scale_v1` and `wp_viewporter` are not advertised, so native scaling is currently
+  integer-only; fractional ratios are handled by host presentation and Android pinch zoom. Other
+  optional globals that Waypane does not advertise (for example pointer constraints, tablet,
+  Xwayland shell, and DMABUF protocols) fall back on the client's own non-extension path and are
+  not presented as implemented capabilities.
 - Desktop input uses physical/evdev key forwarding; native desktop IME/preedit integration is
   not implemented yet. Unicode soft-keyboard integration is implemented on Android.
 - SSH agent authentication, Xwayland session management, audio forwarding, and session
