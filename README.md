@@ -84,6 +84,13 @@ Wayland frame callbacks.
   instead without delivering both protocols. Pointer presses set keyboard focus, and tracked
   buttons are released even when the finger or mouse is lifted in a letterbox area. The soft
   keyboard opens only from **Show keyboard**, never on every touch
+- `wl_pointer.set_cursor` tracks each pointer object's focus and latest `enter` serial, ignores
+  stale serials, rejects conflicting surface roles, supports `NULL` hiding, and decrements
+  hotspots on committed `wl_surface.offset`. Destroying an active cursor surface or pointer hides
+  it. Android decodes cursor buffers once and draws them in an independent RGBA8,
+  alpha-blended pass using the same clipped `ViewportTransform`; moving a cursor updates only
+  its small vertex buffer and never re-uploads the desktop texture. Desktop keeps the native OS
+  cursor
 - Frame backpressure: `wl_buffer.release` and `wl_callback.done` are sent after the associated
   native frame is submitted for presentation; occluded desktop windows retain backpressure
 - Bidirectional text clipboard synchronization over Waypipe pipes, bounded to 16 MiB, using
