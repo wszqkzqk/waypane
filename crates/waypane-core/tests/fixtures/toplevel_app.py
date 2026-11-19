@@ -13,6 +13,7 @@ buffer = bytearray()
 saw_keyboard_enter = False
 saw_pointer_enter = False
 saw_key = False
+keyboard_events = []
 
 
 def message(object_id, opcode, payload):
@@ -56,6 +57,8 @@ def events():
 
 def track_input(object_id, opcode):
     global saw_keyboard_enter, saw_pointer_enter, saw_key
+    if object_id == 13:
+        keyboard_events.append((opcode, payload.hex()))
     if object_id == 13 and opcode == 1:
         saw_keyboard_enter = True
     if object_id == 24 and opcode == 0:
@@ -64,7 +67,8 @@ def track_input(object_id, opcode):
         sock.sendall(message(24, 0, struct.pack("<IIii", serial, 0, 0, 0)))
     if object_id == 13 and opcode == 3:
         assert len(payload) == 16, (
-            f"wl_keyboard.key payload has {len(payload)} bytes: {payload.hex()}"
+            f"wl_keyboard.key payload has {len(payload)} bytes: {payload.hex()}; "
+            f"keyboard events: {keyboard_events}"
         )
         _, _, key, state = struct.unpack("<IIII", payload)
         assert (key, state) == (42, 1)
