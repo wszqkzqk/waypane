@@ -3,7 +3,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use russh::client::{self, ChannelOpenHandle, Handle, Handler, Msg, Session};
+use russh::client::{self, AuthResult, ChannelOpenHandle, Handle, Handler, Msg, Session};
 use russh::keys::{
     check_known_hosts, check_known_hosts_path, load_secret_key, HashAlg, PrivateKeyWithHashAlg,
     PublicKey, PublicKeyOrCertificate,
@@ -548,50 +548,156 @@ async fn exec_capture(
 }
 
 async fn authenticate(handle: &mut Handle<SshHandler>, config: &SshConfig) -> Result<()> {
-    let authenticated = match &config.authentication {
+    match &config.authentication {
         Authentication::Password(password) => {
             if password.is_empty() {
                 return Err(Error::MissingAuthentication);
             }
-            handle
-                .authenticate_password(&config.user, password)
-                .await?
-                .success()
+            let result = handle.authenticate_password(&config.user, password).await?;
+            finish_auth_result(config, "password".to_string(), None, result)
         }
         Authentication::PublicKey { path, passphrase } => {
-            authenticate_key(handle, &config.user, path, passphrase.as_deref()).await?
+            authenticate_key(handle, config, path, passphrase.as_deref()).await
         }
         Authentication::Auto => {
-            let mut authenticated = false;
-            for path in default_key_paths() {
-                if path.is_file() && authenticate_key(handle, &config.user, &path, None).await? {
-                    authenticated = true;
-                    break;
+            let candidates = default_key_paths()
+                .into_iter()
+                .filter(|path| path.is_file())
+                .collect::<Vec<_>>();
+            if candidates.is_empty() {
+                return Err(auth_failure(
+                    config,
+                    "default private keys",
+                    None,
+                    "no readable ~/.ssh/id_ed25519 or ~/.ssh/id_rsa was found",
+                ));
+            }
+            let mut failures = Vec::new();
+            for path in candidates {
+                match authenticate_key(handle, config, &path, None).await {
+                    Ok(()) => return Ok(()),
+                    Err(Error::AuthenticationFailed { details, .. }) => {
+                        failures.push(format!("{}: {details}", path.display()))
+                    }
+                    Err(error) => failures.push(format!("{}: {error}", path.display())),
                 }
             }
-            authenticated
+            Err(auth_failure(
+                config,
+                "default private keys",
+                None,
+                failures.join("; "),
+            ))
         }
-    };
-    if !authenticated {
-        return Err(Error::AuthenticationFailed(config.user.clone()));
     }
-    Ok(())
 }
 
 async fn authenticate_key(
     handle: &mut Handle<SshHandler>,
-    user: &str,
+    config: &SshConfig,
     path: &Path,
     passphrase: Option<&str>,
-) -> Result<bool> {
+) -> Result<()> {
     let key = load_secret_key(path, passphrase).map_err(|error| {
+        let passphrase_note = if passphrase.is_some() {
+            "with the supplied passphrase"
+        } else {
+            "without a passphrase"
+        };
         Error::InvalidConfiguration(format!(
-            "failed to load SSH key {}: {error}",
+            "failed to load SSH private key {} {passphrase_note}: {error}. Make sure the file is a private key (not a .pub file) and, if encrypted, that its passphrase is correct",
             path.display()
         ))
     })?;
-    let key = PrivateKeyWithHashAlg::new(Arc::new(key), None);
-    Ok(handle.authenticate_publickey(user, key).await?.success())
+    let hash_alg = if key.algorithm().is_rsa() {
+        match handle.best_supported_rsa_hash().await? {
+            Some(Some(hash_alg)) => Some(hash_alg),
+            Some(None) => {
+                return Err(auth_failure(
+                    config,
+                    "publickey (RSA)",
+                    Some(key.public_key()),
+                    "the server's server-sig-algs extension does not offer rsa-sha2-512 or rsa-sha2-256. Waypane will not fall back to insecure ssh-rsa (SHA-1); use an Ed25519/ECDSA key or enable RSA-SHA2 on the server",
+                ));
+            }
+            None => Some(HashAlg::Sha512),
+        }
+    } else {
+        None
+    };
+    let key = PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg);
+    let public_key = key.public_key().clone();
+    let method = format!("publickey ({})", key.algorithm().as_str());
+    let result = handle.authenticate_publickey(&config.user, key).await?;
+    finish_auth_result(config, method, Some(&public_key), result)
+}
+
+fn finish_auth_result(
+    config: &SshConfig,
+    method: String,
+    key: Option<&PublicKey>,
+    result: AuthResult,
+) -> Result<()> {
+    match result {
+        AuthResult::Success => Ok(()),
+        AuthResult::Failure {
+            remaining_methods,
+            partial_success,
+        } => {
+            let remaining = remaining_methods
+                .iter()
+                .map(String::from)
+                .collect::<Vec<_>>();
+            let remaining = if remaining.is_empty() {
+                "none (the server closed authentication or offered no further methods)".to_string()
+            } else {
+                remaining.join(", ")
+            };
+            let outcome = if partial_success {
+                "credential accepted, but the server requires an additional authentication factor (partial success)"
+            } else {
+                "server rejected this credential"
+            };
+            let key_detail = key.map_or_else(String::new, |key| {
+                format!(
+                    "; public key {} {} (compare this fingerprint with authorized_keys)",
+                    key.algorithm().as_str(),
+                    key.fingerprint(HashAlg::Sha256)
+                )
+            });
+            Err(auth_failure(
+                config,
+                method,
+                None,
+                format!(
+                    "{outcome}; remaining methods offered by the server: [{remaining}]{key_detail}"
+                ),
+            ))
+        }
+    }
+}
+
+fn auth_failure(
+    config: &SshConfig,
+    method: impl Into<String>,
+    key: Option<&PublicKey>,
+    details: impl Into<String>,
+) -> Error {
+    let mut details = details.into();
+    if let Some(key) = key {
+        details.push_str(&format!(
+            "; public key {} {}",
+            key.algorithm().as_str(),
+            key.fingerprint(HashAlg::Sha256)
+        ));
+    }
+    Error::AuthenticationFailed {
+        host: config.host.clone(),
+        port: config.port,
+        user: config.user.clone(),
+        method: method.into(),
+        details,
+    }
 }
 
 fn default_key_paths() -> Vec<PathBuf> {
@@ -778,5 +884,38 @@ mod tests {
         );
         assert!(result.unwrap_err().to_string().contains("cancelled"));
         assert!(!channel.is_pending());
+    }
+
+    #[test]
+    fn authentication_failure_reports_methods_and_public_key_fingerprint() {
+        let config = SshConfig {
+            host: "example.test".to_string(),
+            port: 8022,
+            user: "alice".to_string(),
+            authentication: Authentication::Password(String::new()),
+            known_hosts: None,
+            host_key_policy: HostKeyPolicy::Check,
+        };
+        let error = finish_auth_result(
+            &config,
+            "publickey (rsa-sha2-512)".to_string(),
+            Some(&key('J')),
+            AuthResult::Failure {
+                remaining_methods: russh::MethodSet::from(
+                    &[
+                        russh::MethodKind::PublicKey,
+                        russh::MethodKind::KeyboardInteractive,
+                    ][..],
+                ),
+                partial_success: false,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("alice@example.test:8022"));
+        assert!(error.contains("publickey (rsa-sha2-512)"));
+        assert!(error.contains("publickey, keyboard-interactive"));
+        assert!(error.contains("SHA256:ldyiXa1JQakitNU5tErauu8DvWQ1dZ7aXu+rm7KQuog"));
+        assert!(error.contains("server rejected this credential"));
     }
 }

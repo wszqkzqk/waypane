@@ -13,8 +13,14 @@ pub enum Error {
         reason: String,
     },
 
-    #[error("SSH authentication failed for user {0}")]
-    AuthenticationFailed(String),
+    #[error("SSH authentication failed for {user}@{host}:{port} using {method}: {details}")]
+    AuthenticationFailed {
+        host: String,
+        port: u16,
+        user: String,
+        method: String,
+        details: String,
+    },
 
     #[error("no SSH authentication method configured; add --identity or --password-env")]
     MissingAuthentication,
