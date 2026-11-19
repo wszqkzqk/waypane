@@ -107,6 +107,11 @@ pub enum CoreEvent {
         states: Vec<u32>,
     },
     Frame(Frame),
+    CursorChanged {
+        window_id: Option<WindowId>,
+        buffer: Option<BufferView>,
+        hotspot: Point,
+    },
     PipeAvailable {
         rid: Rid,
     },

@@ -498,3 +498,153 @@ fn queued_frame_keeps_its_shm_snapshot_after_diff_and_pool_close() {
     assert_eq!(fixture.client.resources().data(Rid(1)), None);
     assert_eq!(&*snapshot, &[0, 255, 0, 0]);
 }
+
+#[test]
+fn tracks_cursor_serial_role_hotspot_and_surface_lifetime() {
+    let mut fixture = Fixture::new();
+    fixture
+        .compositor
+        .insert_record(60, record(&wl::WL_POINTER_INTERFACE))
+        .unwrap();
+    fixture.compositor.seats.insert(
+        1,
+        Seat {
+            pointers: vec![60],
+            ..Seat::default()
+        },
+    );
+    for id in [61, 62] {
+        fixture
+            .compositor
+            .insert_record(id, record(&wl::WL_SURFACE_INTERFACE))
+            .unwrap();
+        fixture.compositor.surfaces.insert(id, Surface::default());
+    }
+    fixture
+        .compositor
+        .pointer_focus(Some(1), 10.0, 20.0)
+        .unwrap();
+    let serial = fixture.compositor.pointers[&60].enter_serial.unwrap();
+    let set_cursor = |serial, surface| DecodedRequest {
+        object_id: 60,
+        interface: &wl::WL_POINTER_INTERFACE,
+        method: method(&wl::WL_POINTER_INTERFACE, "set_cursor"),
+        opcode: 0,
+        version: 1,
+        args: vec![
+            Value::Uint(serial),
+            Value::Object(surface),
+            Value::Int(2),
+            Value::Int(3),
+        ],
+    };
+
+    fixture
+        .compositor
+        .dispatch(
+            &mut fixture.client,
+            &set_cursor(serial.wrapping_add(1), Some(62)),
+            ObjectKind::Pointer,
+        )
+        .unwrap();
+    assert_eq!(fixture.compositor.surfaces[&62].role, Role::None);
+    let error = fixture
+        .compositor
+        .dispatch(
+            &mut fixture.client,
+            &set_cursor(serial, Some(10)),
+            ObjectKind::Pointer,
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("different role"), "{error}");
+
+    fixture.compositor.take_events();
+    fixture
+        .compositor
+        .dispatch(
+            &mut fixture.client,
+            &set_cursor(serial, Some(61)),
+            ObjectKind::Pointer,
+        )
+        .unwrap();
+    assert_eq!(
+        fixture.compositor.surfaces[&61].role,
+        Role::Cursor { pointer: 60 }
+    );
+    assert_eq!(
+        fixture.compositor.cursor_placement(),
+        Some((1, 10.0, 20.0, Point { x: 2, y: 3 }))
+    );
+    let events = fixture.compositor.take_events();
+    assert!(matches!(
+        events.as_slice(),
+        [CoreEvent::CursorChanged {
+            window_id: Some(1),
+            buffer: None,
+            hotspot: Point { x: 2, y: 3 },
+        }]
+    ));
+
+    let surface = fixture.compositor.surfaces.get_mut(&61).unwrap();
+    surface.pending.attach = Some(Some(51));
+    surface.pending.offset = Some(Point { x: 4, y: 1 });
+    fixture
+        .compositor
+        .commit_surface_now(&mut fixture.client, 61)
+        .unwrap();
+    assert_eq!(
+        fixture.compositor.surfaces[&61].committed.offset,
+        Point { x: 4, y: 1 }
+    );
+    let events = fixture.compositor.take_events();
+    match events.as_slice() {
+        [CoreEvent::CursorChanged {
+            window_id: Some(1),
+            buffer: Some(view),
+            hotspot: Point { x: -2, y: 2 },
+        }] => assert_eq!(&*view.data, &[0, 255, 0, 0]),
+        other => panic!("unexpected cursor events: {other:?}"),
+    }
+
+    fixture
+        .compositor
+        .dispatch(
+            &mut fixture.client,
+            &set_cursor(serial, None),
+            ObjectKind::Pointer,
+        )
+        .unwrap();
+    assert_eq!(fixture.compositor.cursor_placement(), None);
+    assert!(matches!(
+        fixture.compositor.take_events().as_slice(),
+        [CoreEvent::CursorChanged {
+            window_id: None,
+            buffer: None,
+            ..
+        }]
+    ));
+
+    fixture
+        .compositor
+        .dispatch(
+            &mut fixture.client,
+            &set_cursor(serial, Some(61)),
+            ObjectKind::Pointer,
+        )
+        .unwrap();
+    fixture.compositor.take_events();
+    fixture
+        .compositor
+        .finish_destructor(&mut fixture.client, 61, ObjectKind::Surface)
+        .unwrap();
+    assert_eq!(fixture.compositor.cursor_placement(), None);
+    assert!(matches!(
+        fixture.compositor.take_events().as_slice(),
+        [CoreEvent::CursorChanged {
+            window_id: None,
+            buffer: None,
+            ..
+        }]
+    ));
+}

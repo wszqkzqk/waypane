@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 use bytes::{Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 use waypane_core::{Connection, CoreEvent, Frame, Point, Size, WindowId, WindowKind};
-use waypane_render::{Canvas, ImageError, Viewport, ViewportTransform};
+use waypane_render::{
+    decode_buffer, Canvas, DecodedBuffer, ImageError, Viewport, ViewportTransform,
+};
 use waypane_transport::HostKeyPrompt as TransportHostKeyPrompt;
 use waypipe_client::{ClientConfig, Compression};
 
@@ -147,12 +149,20 @@ impl SurfaceSignal {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct AndroidCursor {
+    pub position: Point,
+    pub size: Size,
+    pub rgba: Arc<[u8]>,
+}
+
 #[derive(Debug)]
 pub struct AndroidSurface {
     pub canvas: Canvas,
     pub version: u64,
     pub signal: Arc<SurfaceSignal>,
     pub viewport: Viewport,
+    pub cursor: Option<AndroidCursor>,
     view_size: Size,
     touch_active: bool,
     pointer_buttons: BTreeSet<u32>,
@@ -167,6 +177,7 @@ impl AndroidSurface {
             version: 0,
             signal: Arc::new(SurfaceSignal::default()),
             viewport: Viewport::default(),
+            cursor: None,
             view_size: Size {
                 width: 1,
                 height: 1,
@@ -229,6 +240,7 @@ pub struct AndroidEngine {
     surfaces: HashMap<SurfaceKey, Arc<Mutex<AndroidSurface>>>,
     windows: HashMap<SurfaceKey, AndroidWindow>,
     popups: HashMap<SurfaceKey, PopupInfo>,
+    cursor_image: Option<(WindowId, DecodedBuffer)>,
     host_clipboard: Option<String>,
     clock: Instant,
 }
@@ -244,6 +256,7 @@ impl AndroidEngine {
             surfaces: HashMap::new(),
             windows: HashMap::new(),
             popups: HashMap::new(),
+            cursor_image: None,
             host_clipboard: None,
             clock: Instant::now(),
         }
@@ -625,6 +638,7 @@ impl AndroidEngine {
                 .compositor_mut()
                 .pointer_button(button, pressed, time)?;
         }
+        self.sync_cursors(key.session);
         self.flush(key.session)
     }
 
@@ -875,6 +889,7 @@ impl AndroidEngine {
                         self.surfaces.remove(&key);
                         output.events.push(EngineEvent::WindowRemoved { key });
                     }
+                    self.sync_cursors(session);
                 }
                 CoreEvent::WindowConfigured { .. } | CoreEvent::WindowRequest { .. } => {}
                 CoreEvent::PipeAvailable { .. } => {}
@@ -912,6 +927,17 @@ impl AndroidEngine {
                                 .push(EngineEvent::WindowUpsert(window.clone()));
                         }
                     }
+                }
+                CoreEvent::CursorChanged {
+                    window_id, buffer, ..
+                } => {
+                    self.cursor_image = match (window_id, buffer) {
+                        (Some(window_id), Some(buffer)) => {
+                            Some((window_id, decode_buffer(&buffer)?))
+                        }
+                        _ => None,
+                    };
+                    self.sync_cursors(session);
                 }
                 CoreEvent::Negotiated {
                     remote_version,
@@ -955,20 +981,84 @@ impl AndroidEngine {
 
     fn apply_frame(&mut self, key: SurfaceKey, frame: &Frame) -> Result<(), EngineError> {
         let surface = self.surface(key).ok_or(EngineError::UnknownSurface(key))?;
-        let mut surface = surface
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        surface.canvas.apply_frame(frame)?;
-        if frame.parent.is_none() {
-            if let Some(buffer) = &frame.buffer {
-                surface.scale = buffer.scale.max(1);
+        let scale_changed = {
+            let mut surface = surface
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            surface.canvas.apply_frame(frame)?;
+            let scale_changed = if frame.parent.is_none() {
+                if let Some(buffer) = &frame.buffer {
+                    let scale = buffer.scale.max(1);
+                    let changed = surface.scale != scale;
+                    surface.scale = scale;
+                    changed
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            surface.version += 1;
+            let version = surface.version;
+            surface.frames.push_back((version, frame.id));
+            surface.signal.mark_dirty(version);
+            scale_changed
+        };
+        if scale_changed {
+            self.sync_cursors(key.session);
+        }
+        Ok(())
+    }
+
+    fn sync_cursors(&self, session: SessionId) {
+        let placement = self
+            .connections
+            .get(&session)
+            .and_then(|connection| connection.compositor().cursor_placement());
+        let keys = self
+            .surfaces
+            .keys()
+            .filter(|key| key.session == session)
+            .copied()
+            .collect::<Vec<_>>();
+        for key in keys {
+            let Some(surface) = self.surface(key) else {
+                continue;
+            };
+            let mut surface = surface
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let next = match (placement, self.cursor_image.as_ref()) {
+                (Some((window, x, y, hotspot)), Some((image_window, image)))
+                    if window == key.window && image_window == &window =>
+                {
+                    let scale = f64::from(surface.scale.max(1));
+                    Some(AndroidCursor {
+                        position: Point {
+                            x: ((x - f64::from(hotspot.x)) * scale).floor() as i32,
+                            y: ((y - f64::from(hotspot.y)) * scale).floor() as i32,
+                        },
+                        size: image.size,
+                        rgba: image.rgba.clone(),
+                    })
+                }
+                _ => None,
+            };
+            let changed = match (surface.cursor.as_ref(), next.as_ref()) {
+                (None, None) => false,
+                (Some(current), Some(next)) => {
+                    current.position != next.position
+                        || current.size != next.size
+                        || !Arc::ptr_eq(&current.rgba, &next.rgba)
+                }
+                _ => true,
+            };
+            if changed {
+                surface.cursor = next;
+                let version = surface.version;
+                surface.signal.mark_dirty(version);
             }
         }
-        surface.version += 1;
-        let version = surface.version;
-        surface.frames.push_back((version, frame.id));
-        surface.signal.mark_dirty(version);
-        Ok(())
     }
 }
 

@@ -70,6 +70,7 @@ pub struct Compositor {
     windows: BTreeMap<WindowId, Window>,
     positioners: BTreeMap<u32, Positioner>,
     seats: BTreeMap<u32, Seat>,
+    pointers: BTreeMap<u32, PointerState>,
     outputs: Vec<u32>,
     data_devices: BTreeMap<u32, DataDevice>,
     data_sources: BTreeMap<u32, DataSource>,
@@ -89,6 +90,8 @@ pub struct Compositor {
     output_scale: i32,
     keyboard_focus: Option<WindowId>,
     pointer_focus: Option<(WindowId, SurfaceId, f64, f64)>,
+    pointer_window: Option<(WindowId, f64, f64)>,
+    active_pointer: Option<u32>,
     touches: BTreeMap<i32, (SurfaceId, f64, f64)>,
     text_inputs: BTreeMap<u32, TextInput>,
     modifiers: Modifiers,
@@ -107,6 +110,7 @@ impl Compositor {
             windows: BTreeMap::new(),
             positioners: BTreeMap::new(),
             seats: BTreeMap::new(),
+            pointers: BTreeMap::new(),
             outputs: Vec::new(),
             data_devices: BTreeMap::new(),
             data_sources: BTreeMap::new(),
@@ -129,6 +133,8 @@ impl Compositor {
             output_scale: 1,
             keyboard_focus: None,
             pointer_focus: None,
+            pointer_window: None,
+            active_pointer: None,
             touches: BTreeMap::new(),
             text_inputs: BTreeMap::new(),
             modifiers: Modifiers::default(),
@@ -324,55 +330,68 @@ impl Compositor {
 
     pub fn pointer_focus(&mut self, window_id: Option<WindowId>, x: f64, y: f64) -> Result<()> {
         let target = window_id.and_then(|id| self.hit_surface(id, x, y));
-        let previous = self.pointer_focus;
-        let changed = previous.map(|focus| (focus.0, focus.1))
-            != target.map(|(surface, _, _)| (window_id.unwrap_or_default(), surface));
         let pointers = self
             .seats
             .values()
             .flat_map(|seat| seat.pointers.iter().copied())
             .collect::<Vec<_>>();
+        let target_focus = target.map(|(surface, _, _)| (window_id.unwrap_or_default(), surface));
         for pointer in pointers {
-            if changed {
-                if let Some((old_window, old_surface, _, _)) = previous {
-                    if self.objects.contains_key(&old_surface) {
-                        let serial = self.next_serial();
-                        self.emit(
-                            &wl::WL_POINTER_INTERFACE,
-                            "leave",
-                            pointer,
-                            &[Argument::Uint(serial), Argument::Object(old_surface)],
-                        );
-                    }
-                    if Some(old_window) != window_id
-                        && self
-                            .windows
-                            .get(&old_window)
-                            .is_some_and(|window| matches!(window.kind, WindowKind::Popup { .. }))
-                    {
-                        self.emit(&xdg::XDG_POPUP_INTERFACE, "popup_done", old_window, &[]);
-                    }
-                }
-                if let Some((surface, local_x, local_y)) = target {
+            let previous = self.pointers.entry(pointer).or_default().focus;
+            if previous == target_focus {
+                continue;
+            }
+            if let Some((old_window, old_surface)) = previous {
+                if self.objects.contains_key(&old_surface) {
                     let serial = self.next_serial();
                     self.emit(
                         &wl::WL_POINTER_INTERFACE,
-                        "enter",
+                        "leave",
                         pointer,
-                        &[
-                            Argument::Uint(serial),
-                            Argument::Object(surface),
-                            Argument::Fixed(local_x),
-                            Argument::Fixed(local_y),
-                        ],
+                        &[Argument::Uint(serial), Argument::Object(old_surface)],
                     );
-                    self.emit(&wl::WL_POINTER_INTERFACE, "frame", pointer, &[]);
+                }
+                if Some(old_window) != window_id
+                    && self
+                        .windows
+                        .get(&old_window)
+                        .is_some_and(|window| matches!(window.kind, WindowKind::Popup { .. }))
+                {
+                    self.emit(&xdg::XDG_POPUP_INTERFACE, "popup_done", old_window, &[]);
+                }
+            }
+            if let Some((surface, local_x, local_y)) = target {
+                let serial = self.next_serial();
+                self.emit(
+                    &wl::WL_POINTER_INTERFACE,
+                    "enter",
+                    pointer,
+                    &[
+                        Argument::Uint(serial),
+                        Argument::Object(surface),
+                        Argument::Fixed(local_x),
+                        Argument::Fixed(local_y),
+                    ],
+                );
+                self.emit(&wl::WL_POINTER_INTERFACE, "frame", pointer, &[]);
+                let state = self.pointers.entry(pointer).or_default();
+                state.focus = Some((window_id.unwrap_or_default(), surface));
+                state.enter_serial = Some(serial);
+                state.cursor = None;
+                self.active_pointer = Some(pointer);
+            } else {
+                if let Some(state) = self.pointers.get_mut(&pointer) {
+                    state.focus = None;
+                }
+                if self.active_pointer == Some(pointer) {
+                    self.active_pointer = None;
                 }
             }
         }
         self.pointer_focus = target.map(|(surface, local_x, local_y)| {
             (window_id.unwrap_or_default(), surface, local_x, local_y)
         });
+        self.pointer_window = target.map(|_| (window_id.unwrap_or_default(), x, y));
         if let Some((_surface, local_x, local_y)) = target {
             self.emit_pointer_motion(local_x, local_y, 0);
         }
@@ -387,8 +406,21 @@ impl Compositor {
             return self.pointer_focus(Some(window_id), x, y);
         }
         self.pointer_focus = Some((window_id, surface, local_x, local_y));
+        self.pointer_window = Some((window_id, x, y));
         self.emit_pointer_motion(local_x, local_y, time);
         Ok(())
+    }
+
+    pub fn cursor_placement(&self) -> Option<(WindowId, f64, f64, Point)> {
+        let pointer = self.active_pointer?;
+        let cursor = self.pointers.get(&pointer)?.cursor?;
+        let (window, x, y) = self.pointer_window?;
+        (self.pointer_focus.map(|focus| focus.0) == Some(window)).then_some((
+            window,
+            x,
+            y,
+            cursor.hotspot,
+        ))
     }
 
     fn emit_pointer_motion(&mut self, x: f64, y: f64, time: u32) {

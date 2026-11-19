@@ -77,11 +77,6 @@ fn serve(mut stream: UnixStream, compression: Compression) -> Result<(), String>
             match event {
                 CoreEvent::Frame(frame) => {
                     let buffer = frame.buffer.as_ref().ok_or("frame without buffer")?;
-                    let data = connection
-                        .client()
-                        .resources()
-                        .data(buffer.rid)
-                        .ok_or("missing SHM data")?;
                     let mut expected =
                         (bytes::Bytes::from((0u8..=255).collect::<Vec<_>>())).repeat(16);
                     if frames > 0 {
@@ -97,7 +92,7 @@ fn serve(mut stream: UnixStream, compression: Compression) -> Result<(), String>
                             ));
                         }
                     }
-                    if data != expected.as_slice() {
+                    if &*buffer.data != expected.as_slice() {
                         return Err(format!("SHM pixel mismatch on frame {frames}"));
                     }
                     let outgoing = connection

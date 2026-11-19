@@ -1,5 +1,13 @@
+use std::sync::Arc;
+
 use thiserror::Error;
 use waypane_core::{BufferView, Frame, Point, Rect, ShmFormat, Size, SurfaceId};
+
+#[derive(Debug, Clone)]
+pub struct DecodedBuffer {
+    pub size: Size,
+    pub rgba: Arc<[u8]>,
+}
 
 #[derive(Debug, Error)]
 pub enum ImageError {
@@ -192,6 +200,32 @@ impl Canvas {
         blit_rgba(&mut self.rgba, self.size.width as usize, rect, &rgba);
         vec![UploadRegion { rect, rgba }]
     }
+}
+
+pub fn decode_buffer(view: &BufferView) -> Result<DecodedBuffer, ImageError> {
+    if view.width <= 0 || view.height <= 0 || view.offset < 0 {
+        return Err(ImageError::OutOfBounds(
+            "cursor buffer has invalid dimensions or offset".to_string(),
+        ));
+    }
+    let size = output_size(view.width as u32, view.height as u32, view.transform);
+    let regions = decode_regions(
+        &view.data,
+        view,
+        &[Rect {
+            x: 0,
+            y: 0,
+            width: view.width,
+            height: view.height,
+        }],
+    )?;
+    let region = regions.into_iter().next().ok_or_else(|| {
+        ImageError::OutOfBounds("cursor buffer decoded to an empty region".to_string())
+    })?;
+    Ok(DecodedBuffer {
+        size,
+        rgba: Arc::from(region.rgba),
+    })
 }
 
 fn decode_regions(

@@ -536,6 +536,13 @@ impl Compositor {
                     .unwrap()
                     .pointers
                     .push(id);
+                self.pointers.entry(id).or_default();
+                if let Some((window, x, y)) = self.pointer_window {
+                    self.pointer_focus(Some(window), x, y)?;
+                }
+            }
+            (ObjectKind::Pointer, "set_cursor") => {
+                self.set_cursor(client, request)?;
             }
             (ObjectKind::Seat, "get_keyboard") => {
                 let id = self.create_new(request, 0)?;
@@ -853,7 +860,18 @@ impl Compositor {
             }
         }
 
-        let (buffer_id, callbacks, scale, transform, damage, attach, window_id, role, position) = {
+        let (
+            buffer_id,
+            callbacks,
+            scale,
+            transform,
+            damage,
+            attach,
+            offset,
+            window_id,
+            role,
+            position,
+        ) = {
             let surface = self
                 .surfaces
                 .get_mut(&surface_id)
@@ -862,8 +880,10 @@ impl Compositor {
             if let Some(buffer) = attach {
                 surface.committed.buffer = buffer;
             }
-            if let Some(offset) = surface.pending.offset.take() {
-                surface.committed.offset = offset;
+            let offset = surface.pending.offset.take();
+            if let Some(offset) = offset {
+                surface.committed.offset.x = surface.committed.offset.x.saturating_add(offset.x);
+                surface.committed.offset.y = surface.committed.offset.y.saturating_add(offset.y);
             }
             if let Some(scale) = surface.pending.scale.take() {
                 surface.committed.scale = scale;
@@ -881,6 +901,7 @@ impl Compositor {
                 surface.committed.transform,
                 std::mem::take(&mut surface.pending.damage),
                 attach,
+                offset,
                 surface.window_id,
                 surface.role,
                 surface.position,
@@ -913,6 +934,25 @@ impl Compositor {
                     width: (width / view.scale.max(1)).max(1) as u32,
                     height: (height / view.scale.max(1)).max(1) as u32,
                 };
+            }
+        }
+
+        if let Role::Cursor { pointer } = role {
+            if let Some(cursor) = self
+                .pointers
+                .get_mut(&pointer)
+                .and_then(|state| state.cursor.as_mut())
+                .filter(|cursor| cursor.surface == surface_id)
+            {
+                if let Some(offset) = offset {
+                    cursor.hotspot.x = cursor.hotspot.x.saturating_sub(offset.x);
+                    cursor.hotspot.y = cursor.hotspot.y.saturating_sub(offset.y);
+                }
+                self.events.push(CoreEvent::CursorChanged {
+                    window_id: self.pointer_window.map(|(window, _, _)| window),
+                    buffer: buffer.clone(),
+                    hotspot: cursor.hotspot,
+                });
             }
         }
 
@@ -1091,6 +1131,65 @@ impl Compositor {
         }
     }
 
+    fn set_cursor(&mut self, client: &Client, request: &DecodedRequest) -> Result<()> {
+        let serial = uint(request, 0)?;
+        let surface = optional_object_id(request, 1)?;
+        let hotspot = Point {
+            x: int(request, 2)?,
+            y: int(request, 3)?,
+        };
+        if let Some(surface) = surface {
+            let role = self
+                .surfaces
+                .get(&surface)
+                .ok_or_else(|| {
+                    Error::protocol("wl_pointer.set_cursor references an unknown surface")
+                })?
+                .role;
+            if !matches!(role, Role::None | Role::Cursor { .. }) {
+                return Err(Error::protocol(
+                    "wl_pointer.set_cursor surface already has a different role",
+                ));
+            }
+        }
+
+        let pointer = request.object_id;
+        if self
+            .pointers
+            .get(&pointer)
+            .and_then(|state| state.enter_serial)
+            != Some(serial)
+        {
+            return Ok(());
+        }
+        if let Some(surface) = surface {
+            self.surfaces.get_mut(&surface).unwrap().role = Role::Cursor { pointer };
+        }
+        self.pointers.get_mut(&pointer).unwrap().cursor =
+            surface.map(|surface| CursorState { surface, hotspot });
+        self.active_pointer = Some(pointer);
+
+        let existing = surface.and_then(|surface| {
+            let surface = &self.surfaces[&surface];
+            surface
+                .committed
+                .buffer
+                .map(|buffer| (buffer, surface.committed.scale, surface.committed.transform))
+        });
+        let buffer = match existing {
+            Some((buffer, scale, transform)) => {
+                Some(self.buffer_view(client, buffer, scale, transform, &[])?)
+            }
+            None => None,
+        };
+        self.events.push(CoreEvent::CursorChanged {
+            window_id: surface.and_then(|_| self.pointer_window.map(|(window, _, _)| window)),
+            buffer,
+            hotspot,
+        });
+        Ok(())
+    }
+
     fn buffer_view(
         &self,
         client: &Client,
@@ -1204,7 +1303,22 @@ impl Compositor {
     ) -> Result<()> {
         match kind {
             ObjectKind::Surface => {
+                let hid_cursor = self.pointers.values_mut().fold(false, |hidden, state| {
+                    if state.cursor.is_some_and(|cursor| cursor.surface == id) {
+                        state.cursor = None;
+                        true
+                    } else {
+                        hidden
+                    }
+                });
                 self.surfaces.remove(&id);
+                if hid_cursor {
+                    self.events.push(CoreEvent::CursorChanged {
+                        window_id: None,
+                        buffer: None,
+                        hotspot: Point::default(),
+                    });
+                }
             }
             ObjectKind::ShmPool => {
                 if self.pools[&id].buffer_refs == 0 {
@@ -1254,6 +1368,21 @@ impl Compositor {
             ObjectKind::Pointer => {
                 for seat in self.seats.values_mut() {
                     seat.pointers.retain(|pointer| *pointer != id);
+                }
+                let hid_cursor = self
+                    .pointers
+                    .remove(&id)
+                    .and_then(|state| state.cursor)
+                    .is_some();
+                if self.active_pointer == Some(id) {
+                    self.active_pointer = None;
+                }
+                if hid_cursor {
+                    self.events.push(CoreEvent::CursorChanged {
+                        window_id: None,
+                        buffer: None,
+                        hotspot: Point::default(),
+                    });
                 }
             }
             ObjectKind::Touch => {

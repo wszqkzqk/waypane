@@ -148,7 +148,7 @@ impl App {
                 CoreEvent::ClipboardData { data, .. } => {
                     clipboard_data = Some(String::from_utf8_lossy(&data).into_owned());
                 }
-                CoreEvent::TextInputState { .. } => {}
+                CoreEvent::TextInputState { .. } | CoreEvent::CursorChanged { .. } => {}
                 CoreEvent::PipeAvailable { rid } => {
                     log::debug!("clipboard pipe available for RID {}", rid.0);
                 }

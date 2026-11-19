@@ -8,10 +8,10 @@ use jni::objects::JObject;
 use jni::refs::Global;
 use jni::Env;
 use raw_window_handle::{AndroidDisplayHandle, AndroidNdkWindowHandle};
-use waypane_core::Size;
+use waypane_core::{Rect, Size};
 use waypane_render::ViewportTransform;
 
-use crate::{ActorHandle, AndroidSurface, SurfaceKey};
+use crate::{ActorHandle, AndroidCursor, AndroidSurface, SurfaceKey};
 
 #[cfg(target_os = "android")]
 #[link(name = "android")]
@@ -54,19 +54,32 @@ impl Drop for NativeWindowRef {
 
 struct ViewportBlitter {
     pipeline: wgpu::RenderPipeline,
+    overlay_pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     vertices: wgpu::Buffer,
+    overlay_vertices: wgpu::Buffer,
+}
+
+struct ViewportPass<'a> {
+    pipeline: &'a wgpu::RenderPipeline,
+    vertex_buffer: &'a wgpu::Buffer,
+    vertices: &'a [[f32; 4]; 6],
+    load: wgpu::LoadOp<wgpu::Color>,
+    label: &'static str,
 }
 
 impl ViewportBlitter {
     fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
-        let vertices = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("waypane-viewport-vertices"),
-            size: std::mem::size_of::<[[f32; 4]; 6]>() as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        fn vertex_buffer(device: &wgpu::Device, label: &'static str) -> wgpu::Buffer {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: std::mem::size_of::<[[f32; 4]; 6]>() as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        }
+
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("waypane-viewport-sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -103,11 +116,45 @@ impl ViewportBlitter {
             immediate_size: 0,
         });
         let shader = device.create_shader_module(wgpu::include_wgsl!("viewport.wgsl"));
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("waypane-viewport-pipeline"),
-            layout: Some(&pipeline_layout),
+        let pipeline = Self::pipeline(
+            device,
+            &pipeline_layout,
+            &shader,
+            format,
+            None,
+            "waypane-viewport-pipeline",
+        );
+        let overlay_pipeline = Self::pipeline(
+            device,
+            &pipeline_layout,
+            &shader,
+            format,
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+            "waypane-cursor-pipeline",
+        );
+        Self {
+            pipeline,
+            overlay_pipeline,
+            bind_group_layout,
+            sampler,
+            vertices: vertex_buffer(device, "waypane-viewport-vertices"),
+            overlay_vertices: vertex_buffer(device, "waypane-cursor-vertices"),
+        }
+    }
+
+    fn pipeline(
+        device: &wgpu::Device,
+        layout: &wgpu::PipelineLayout,
+        shader: &wgpu::ShaderModule,
+        format: wgpu::TextureFormat,
+        blend: Option<wgpu::BlendState>,
+        label: &'static str,
+    ) -> wgpu::RenderPipeline {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(layout),
             vertex: wgpu::VertexState {
-                module: &shader,
+                module: shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
                 buffers: &[Some(wgpu::VertexBufferLayout {
@@ -117,12 +164,12 @@ impl ViewportBlitter {
                 })],
             },
             fragment: Some(wgpu::FragmentState {
-                module: &shader,
+                module: shader,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
-                    blend: None,
+                    blend,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -136,13 +183,63 @@ impl ViewportBlitter {
             multisample: Default::default(),
             multiview_mask: None,
             cache: None,
-        });
-        Self {
-            pipeline,
-            bind_group_layout,
-            sampler,
-            vertices,
-        }
+        })
+    }
+
+    fn draw_canvas(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        source: &wgpu::TextureView,
+        target: &wgpu::TextureView,
+        transform: &ViewportTransform,
+    ) {
+        let vertices = transform.vertices();
+        self.draw(
+            device,
+            queue,
+            encoder,
+            source,
+            target,
+            ViewportPass {
+                pipeline: &self.pipeline,
+                vertex_buffer: &self.vertices,
+                vertices: &vertices,
+                load: wgpu::LoadOp::Clear(wgpu::Color {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                }),
+                label: "waypane-viewport-pass",
+            },
+        );
+    }
+
+    fn draw_cursor(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        source: &wgpu::TextureView,
+        target: &wgpu::TextureView,
+        vertices: &[[f32; 4]; 6],
+    ) {
+        self.draw(
+            device,
+            queue,
+            encoder,
+            source,
+            target,
+            ViewportPass {
+                pipeline: &self.overlay_pipeline,
+                vertex_buffer: &self.overlay_vertices,
+                vertices,
+                load: wgpu::LoadOp::Load,
+                label: "waypane-cursor-pass",
+            },
+        );
     }
 
     fn draw(
@@ -152,13 +249,9 @@ impl ViewportBlitter {
         encoder: &mut wgpu::CommandEncoder,
         source: &wgpu::TextureView,
         target: &wgpu::TextureView,
-        transform: &ViewportTransform,
+        draw: ViewportPass<'_>,
     ) {
-        queue.write_buffer(
-            &self.vertices,
-            0,
-            bytemuck::cast_slice(&transform.vertices()),
-        );
+        queue.write_buffer(draw.vertex_buffer, 0, bytemuck::cast_slice(draw.vertices));
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("waypane-viewport-bind-group"),
             layout: &self.bind_group_layout,
@@ -174,18 +267,13 @@ impl ViewportBlitter {
             ],
         });
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("waypane-viewport-pass"),
+            label: Some(draw.label),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.0,
-                        g: 0.0,
-                        b: 0.0,
-                        a: 1.0,
-                    }),
+                    load: draw.load,
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -194,9 +282,9 @@ impl ViewportBlitter {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&self.pipeline);
+        pass.set_pipeline(draw.pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        pass.set_vertex_buffer(0, self.vertices.slice(..));
+        pass.set_vertex_buffer(0, draw.vertex_buffer.slice(..));
         pass.draw(0..6, 0..1);
     }
 }
@@ -270,6 +358,8 @@ struct NativeSurface {
     texture: Option<wgpu::Texture>,
     texture_size: Size,
     texture_version: Option<u64>,
+    cursor_texture: Option<wgpu::Texture>,
+    cursor_rgba: Option<Arc<[u8]>>,
     blitter: Option<ViewportBlitter>,
     config: Option<wgpu::SurfaceConfiguration>,
     surface: ManuallyDrop<wgpu::Surface<'static>>,
@@ -301,6 +391,8 @@ impl NativeSurface {
             texture: None,
             texture_size: Size::default(),
             texture_version: None,
+            cursor_texture: None,
+            cursor_rgba: None,
             blitter: None,
             config: None,
             surface: ManuallyDrop::new(surface),
@@ -350,6 +442,55 @@ impl NativeSurface {
         self.config = Some(config);
         self.blitter = Some(blitter);
         Ok(())
+    }
+
+    fn update_cursor(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        cursor: Option<&AndroidCursor>,
+    ) {
+        let Some(cursor) = cursor.filter(|cursor| cursor.size.width > 0 && cursor.size.height > 0)
+        else {
+            self.cursor_texture = None;
+            self.cursor_rgba = None;
+            return;
+        };
+        if self.cursor_texture.is_some()
+            && self
+                .cursor_rgba
+                .as_ref()
+                .is_some_and(|rgba| Arc::ptr_eq(rgba, &cursor.rgba))
+        {
+            return;
+        }
+        let size = wgpu::Extent3d {
+            width: cursor.size.width,
+            height: cursor.size.height,
+            depth_or_array_layers: 1,
+        };
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("waypane-android-cursor"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            texture.as_image_copy(),
+            &cursor.rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(cursor.size.width * 4),
+                rows_per_image: Some(cursor.size.height),
+            },
+            size,
+        );
+        self.cursor_texture = Some(texture);
+        self.cursor_rgba = Some(cursor.rgba.clone());
     }
 
     fn present(
@@ -406,6 +547,9 @@ impl NativeSurface {
             self.texture_version = Some(state.version);
         }
 
+        let source = texture.create_view(&Default::default());
+        let cursor = state.cursor.clone();
+        self.update_cursor(device, queue, cursor.as_ref());
         let (width, height) = self
             .config
             .as_ref()
@@ -418,6 +562,19 @@ impl NativeSurface {
                     size.width, size.height, width, height
                 )
             })?;
+        let cursor_vertices = cursor.as_ref().and_then(|cursor| {
+            let width = i32::try_from(cursor.size.width).ok()?;
+            let height = i32::try_from(cursor.size.height).ok()?;
+            transform.region_vertices(
+                size,
+                Rect {
+                    x: cursor.position.x,
+                    y: cursor.position.y,
+                    width,
+                    height,
+                },
+            )
+        });
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
@@ -443,10 +600,22 @@ impl NativeSurface {
             .blitter
             .as_ref()
             .ok_or_else(|| "Android surface blitter was not initialized".to_string())?;
-        let source = texture.create_view(&Default::default());
         let target = frame.texture.create_view(&Default::default());
         let mut encoder = device.create_command_encoder(&Default::default());
-        blitter.draw(device, queue, &mut encoder, &source, &target, &transform);
+        blitter.draw_canvas(device, queue, &mut encoder, &source, &target, &transform);
+        if let (Some(cursor_texture), Some(vertices)) =
+            (self.cursor_texture.as_ref(), cursor_vertices.as_ref())
+        {
+            let cursor_source = cursor_texture.create_view(&Default::default());
+            blitter.draw_cursor(
+                device,
+                queue,
+                &mut encoder,
+                &cursor_source,
+                &target,
+                vertices,
+            );
+        }
         queue.submit([encoder.finish()]);
         queue.present(frame);
         let version = state.version;
@@ -457,6 +626,8 @@ impl NativeSurface {
 
 impl Drop for NativeSurface {
     fn drop(&mut self) {
+        self.cursor_texture.take();
+        self.cursor_rgba = None;
         self.texture.take();
         self.blitter.take();
         self.config.take();

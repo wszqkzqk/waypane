@@ -8,5 +8,5 @@ pub mod keys;
 
 #[cfg(feature = "desktop")]
 pub use desktop::{DesktopError, DesktopRenderer, PresentedFrame};
-pub use image::{output_size, Canvas, ImageError, UploadRegion};
+pub use image::{decode_buffer, output_size, Canvas, DecodedBuffer, ImageError, UploadRegion};
 pub use viewport::{Viewport, ViewportTransform, MAX_VIEWPORT_ZOOM, MIN_VIEWPORT_ZOOM};

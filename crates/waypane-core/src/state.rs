@@ -2,7 +2,7 @@ use crate::wayland_backend::protocol::Interface;
 use waypipe_client::Rid;
 
 use crate::protocol::interface_by_name;
-use crate::types::{Point, Rect, ShmFormat, WindowId, WindowKind};
+use crate::types::{Point, Rect, ShmFormat, SurfaceId, WindowId, WindowKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ObjectKind {
@@ -129,6 +129,9 @@ pub(crate) enum Role {
     Subsurface {
         parent: u32,
         proxy: u32,
+    },
+    Cursor {
+        pointer: u32,
     },
 }
 
@@ -273,6 +276,19 @@ pub(crate) struct Positioner {
     pub size: Option<(i32, i32)>,
     pub anchor_rect: Option<Rect>,
     pub offset: Point,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CursorState {
+    pub surface: u32,
+    pub hotspot: Point,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct PointerState {
+    pub focus: Option<(WindowId, SurfaceId)>,
+    pub enter_serial: Option<u32>,
+    pub cursor: Option<CursorState>,
 }
 
 #[derive(Debug, Default)]

@@ -1,4 +1,4 @@
-use waypane_core::Size;
+use waypane_core::{Rect, Size};
 
 pub const MIN_VIEWPORT_ZOOM: f32 = 1.0;
 pub const MAX_VIEWPORT_ZOOM: f32 = 8.0;
@@ -97,6 +97,45 @@ impl ViewportTransform {
             [right, bottom, 1.0, 1.0],
             [right, top, 1.0, 0.0],
         ]
+    }
+
+    pub fn region_vertices(&self, buffer_size: Size, region: Rect) -> Option<[[f32; 4]; 6]> {
+        let buffer_width = i32::try_from(buffer_size.width).ok()?;
+        let buffer_height = i32::try_from(buffer_size.height).ok()?;
+        if buffer_width == 0 || buffer_height == 0 || region.width <= 0 || region.height <= 0 {
+            return None;
+        }
+        let x0 = region.x.clamp(0, buffer_width);
+        let y0 = region.y.clamp(0, buffer_height);
+        let x1 = region.x.saturating_add(region.width).clamp(0, buffer_width);
+        let y1 = region
+            .y
+            .saturating_add(region.height)
+            .clamp(0, buffer_height);
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+
+        let left = self.draw_x + x0 as f32 / buffer_width as f32 * self.draw_width;
+        let right = self.draw_x + x1 as f32 / buffer_width as f32 * self.draw_width;
+        let top = self.draw_y + y0 as f32 / buffer_height as f32 * self.draw_height;
+        let bottom = self.draw_y + y1 as f32 / buffer_height as f32 * self.draw_height;
+        let ndc_left = left * 2.0 - 1.0;
+        let ndc_right = right * 2.0 - 1.0;
+        let ndc_top = 1.0 - top * 2.0;
+        let ndc_bottom = 1.0 - bottom * 2.0;
+        let u0 = (x0 - region.x) as f32 / region.width as f32;
+        let u1 = (x1 - region.x) as f32 / region.width as f32;
+        let v0 = (y0 - region.y) as f32 / region.height as f32;
+        let v1 = (y1 - region.y) as f32 / region.height as f32;
+        Some([
+            [ndc_left, ndc_top, u0, v0],
+            [ndc_left, ndc_bottom, u0, v1],
+            [ndc_right, ndc_bottom, u1, v1],
+            [ndc_left, ndc_top, u0, v0],
+            [ndc_right, ndc_bottom, u1, v1],
+            [ndc_right, ndc_top, u1, v0],
+        ])
     }
 
     pub fn view_to_content(&self, x: f32, y: f32) -> Option<(f32, f32)> {
@@ -235,6 +274,64 @@ mod tests {
         close(center.1, 0.5);
         assert_eq!(transform.view_to_content(1.0, 0.5), None);
         assert_eq!(transform.view_to_content(f32::NAN, 0.5), None);
+    }
+
+    #[test]
+    fn maps_and_clips_cursor_regions_with_matching_uvs() {
+        let transform = ViewportTransform::new(
+            Size {
+                width: 200,
+                height: 100,
+            },
+            Size {
+                width: 200,
+                height: 100,
+            },
+            Viewport {
+                zoom: 1.0,
+                pan_x: 0.0,
+                pan_y: 0.0,
+            },
+        )
+        .unwrap();
+        let vertices = transform
+            .region_vertices(
+                Size {
+                    width: 200,
+                    height: 100,
+                },
+                Rect {
+                    x: -10,
+                    y: 25,
+                    width: 20,
+                    height: 20,
+                },
+            )
+            .unwrap();
+        for (actual, expected) in vertices[0].into_iter().zip([-1.0, 0.5, 0.5, 0.0]) {
+            close(actual, expected);
+        }
+        for (actual, expected) in vertices[1].into_iter().zip([-1.0, 0.1, 0.5, 1.0]) {
+            close(actual, expected);
+        }
+        for (actual, expected) in vertices[2].into_iter().zip([-0.9, 0.1, 1.0, 1.0]) {
+            close(actual, expected);
+        }
+        assert_eq!(
+            transform.region_vertices(
+                Size {
+                    width: 200,
+                    height: 100,
+                },
+                Rect {
+                    x: -100,
+                    y: 0,
+                    width: 10,
+                    height: 10,
+                },
+            ),
+            None
+        );
     }
 
     #[test]
