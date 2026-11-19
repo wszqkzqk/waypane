@@ -1009,6 +1009,25 @@ mod tests {
             serde_json::to_string(&EngineEvent::WindowUpsert(window)).unwrap(),
             r#"{"type":"window_upsert","key":{"session":1,"window":2},"title":"Terminal","app_id":"org.waypipe.foot","width":800,"height":600}"#
         );
+        assert_eq!(
+            serde_json::to_string(&EngineEvent::Negotiated {
+                remote_version: 16,
+                version: 16,
+            })
+            .unwrap(),
+            r#"{"type":"negotiated","remote_version":16,"version":16}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&EngineEvent::HostKeyPrompt {
+                host: "127.0.0.1".into(),
+                port: 8022,
+                algorithm: "ssh-ed25519".into(),
+                fingerprint: "SHA256:test".into(),
+                changed: false,
+            })
+            .unwrap(),
+            r#"{"type":"host_key_prompt","host":"127.0.0.1","port":8022,"algorithm":"ssh-ed25519","fingerprint":"SHA256:test","changed":false}"#
+        );
     }
 
     #[test]
