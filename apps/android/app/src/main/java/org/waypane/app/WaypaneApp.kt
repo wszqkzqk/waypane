@@ -472,7 +472,9 @@ private fun ErrorCard(message: String, onDismiss: () -> Unit) {
         modifier = Modifier.fillMaxWidth().padding(8.dp),
     ) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(message, color = MaterialTheme.colorScheme.onErrorContainer, modifier = Modifier.weight(1f), maxLines = 4)
+            SelectionContainer {
+                Text(message, color = MaterialTheme.colorScheme.onErrorContainer, modifier = Modifier.weight(1f))
+            }
             IconButton(onClick = onDismiss) { Text("Dismiss", color = MaterialTheme.colorScheme.onErrorContainer) }
         }
     }

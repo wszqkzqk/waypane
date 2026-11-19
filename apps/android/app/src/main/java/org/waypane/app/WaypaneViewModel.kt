@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.ClipData
 import android.content.ClipDescription
 import android.content.ClipboardManager
+import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -21,6 +22,7 @@ import java.io.InputStream
 import java.util.concurrent.atomic.AtomicLong
 
 private const val MAX_PRIVATE_KEY_BYTES = 64 * 1024
+private const val LOG_TAG = "Waypane"
 
 internal fun restrictToOwner(file: File) {
     if (!file.setReadable(false, false) ||
@@ -256,6 +258,10 @@ class WaypaneViewModel(application: Application) : AndroidViewModel(application)
                 }
             }
             is EngineEvent.HostKeyPrompt -> {
+                Log.i(
+                    LOG_TAG,
+                    "Host key ${event.algorithm} for ${event.host}:${event.port}: ${event.fingerprint} (changed=${event.changed})",
+                )
                 uiState = uiState.copy(
                     hostKeyPrompt = event,
                     status = if (event.changed) {
@@ -342,6 +348,7 @@ class WaypaneViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun reportError(message: String) {
+        Log.w(LOG_TAG, message)
         uiState = uiState.copy(error = message, status = message, connecting = false)
         appendLog(message)
     }
