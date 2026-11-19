@@ -116,12 +116,15 @@ fun WaypaneApp(model: WaypaneViewModel) {
     val notificationPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) {}
+    val configuration = LocalConfiguration.current
+    val hideSystemBars = state.immersive ||
+        (state.screen == Screen.Session && configuration.orientation == Configuration.ORIENTATION_LANDSCAPE)
 
-    LaunchedEffect(state.immersive) {
+    LaunchedEffect(hideSystemBars) {
         val controller = WindowCompat.getInsetsController(activity.window, hostView)
         controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        WindowCompat.setDecorFitsSystemWindows(activity.window, !state.immersive)
-        if (state.immersive) {
+        WindowCompat.setDecorFitsSystemWindows(activity.window, !hideSystemBars)
+        if (hideSystemBars) {
             controller.hide(WindowInsetsCompat.Type.systemBars())
         } else {
             controller.show(WindowInsetsCompat.Type.systemBars())
@@ -735,7 +738,9 @@ private fun SessionScreen(
                         .then(
                             if (landscape) {
                                 Modifier.windowInsetsPadding(
-                                    hardwareInsets.only(WindowInsetsSides.Start + WindowInsetsSides.Vertical),
+                                    WindowInsets.displayCutout.only(
+                                        WindowInsetsSides.Start + WindowInsetsSides.Vertical,
+                                    ),
                                 )
                             } else {
                                 Modifier

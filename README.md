@@ -157,7 +157,10 @@ Wayland frame callbacks.
 - Android atomic SAF private-key import with a 64 KiB limit, owner-only app-private storage,
   backup exclusion for keys and `known_hosts`, and a true delete-imported-key action
 - Android acquires each `ANativeWindow` once and runs adapter selection, capability
-  negotiation, configuration, and presentation on the same surface. `SurfacePlan` requires an
+  negotiation, configuration, and presentation on the same surface. If the window is already lost
+  during `surfaceCreated` (for example while an upgrade or resume replaces the Activity), attachment
+  is retried once on the subsequent `surfaceChanged`, and only a failure with a valid reported size
+  reaches the error card. `SurfacePlan` requires an
   RGBA/BGRA 8-bit format and `RENDER_ATTACHMENT` usage, keeps alpha/present mode/color space in
   `Auto` (including devices advertising only `Inherit`), and turns configure failures into
   ordinary errors through wgpu error scopes. Resources drop in strict order: texture/blitter,
@@ -319,9 +322,11 @@ is active.
 - Portrait uses a top app bar and a fixed-height single-line status strip. The status strip never
   changes height when remote log lines arrive, avoiding a feedback loop where logging resized the
   view, triggered Auto-resize, and produced more log lines. Landscape places Back, Keyboard, Fit,
-  Menu, and multi-window switching in a 72dp end-side rail; both the rail and the remote view stay
-  clear of status bars, navigation bars, and display cutouts, and landscape status text is shown
-  inside **Menu** instead of consuming vertical space.
+  Menu, and multi-window switching in a fixed-width 72dp end-side rail and automatically hides the
+  status and navigation bars; an edge swipe reveals them transiently without evicting the session.
+  The remote view pads only stable display-cutout insets, so showing or hiding system bars never
+  changes its size, while buttons inside the rail still respect system bars and cutouts. Landscape
+  status text is shown inside **Menu** instead of consuming vertical space.
 - Opening the soft keyboard translates the remote `SurfaceView` upward in lockstep with
   `WindowInsets.ime` until its bottom edge rests above the keyboard; the container clips the top
   edge, and closing the keyboard moves it back. `Modifier.offset` only changes placement and never
