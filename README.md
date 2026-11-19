@@ -319,12 +319,14 @@ is active.
 - Portrait uses a top app bar and a fixed-height single-line status strip. The status strip never
   changes height when remote log lines arrive, avoiding a feedback loop where logging resized the
   view, triggered Auto-resize, and produced more log lines. Landscape places Back, Keyboard, Fit,
-  Menu, and multi-window switching in a 72dp end-side rail that respects cutouts and system bars;
-  the remote view uses the remaining full height edge to edge, and landscape status text is shown
+  Menu, and multi-window switching in a 72dp end-side rail; both the rail and the remote view stay
+  clear of status bars, navigation bars, and display cutouts, and landscape status text is shown
   inside **Menu** instead of consuming vertical space.
-- The remote view applies `imePadding`, so opening the soft keyboard shrinks the visible view above
-  the keyboard instead of covering the remote application; with Auto-resize enabled the window
-  follows that new visible size after the debounce.
+- Opening or closing the soft keyboard overlays the remote view without changing its geometry.
+  Resizing a `SurfaceView` through every keyboard animation frame stretched old pixels, reallocated
+  the GPU surface dozens of times per animation, and repeatedly reconfigured remote windows under
+  Auto-resize, so stable geometry changes (rotation, fullscreen, rails, system bars, and scale) are
+  deliberately kept separate from transient IME visibility.
 - The screen stays awake while a session is open and the original screen-on/insets behavior is
   restored when the session closes or the UI is destroyed.
 

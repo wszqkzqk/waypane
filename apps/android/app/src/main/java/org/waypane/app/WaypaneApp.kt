@@ -24,7 +24,6 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
@@ -586,6 +585,7 @@ private fun RailAction(label: String, onClick: () -> Unit) {
 
 @Composable
 private fun SessionSideRail(
+    hardwareInsets: WindowInsets,
     windows: List<AndroidWindow>,
     selected: SurfaceKey?,
     hasWindow: Boolean,
@@ -595,7 +595,6 @@ private fun SessionSideRail(
     onFit: () -> Unit,
     onOpenMenu: () -> Unit,
 ) {
-    val hardwareInsets = WindowInsets.systemBars.union(WindowInsets.displayCutout)
     Column(
         modifier = Modifier
             .fillMaxHeight()
@@ -653,6 +652,7 @@ private fun SessionScreen(
     val selected = state.selected
     val selectedWindow = selected?.let(model.windows::get)
     val orderedWindows = model.windows.values.sortedWith(compareBy({ it.key.session }, { it.key.window }))
+    val hardwareInsets = WindowInsets.systemBars.union(WindowInsets.displayCutout)
     val nativeScale = remember(state.waylandScale, configuration, context) {
         context.resolveWaylandScale(state.waylandScale)
     }
@@ -707,8 +707,22 @@ private fun SessionScreen(
                     }
                 }
             }
-            Row(Modifier.weight(1f).fillMaxWidth().imePadding()) {
-                Box(Modifier.weight(1f).fillMaxHeight().background(Color.Black)) {
+            Row(Modifier.weight(1f).fillMaxWidth()) {
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .then(
+                            if (landscape) {
+                                Modifier.windowInsetsPadding(
+                                    hardwareInsets.only(WindowInsetsSides.Start + WindowInsetsSides.Vertical),
+                                )
+                            } else {
+                                Modifier
+                            },
+                        )
+                        .background(Color.Black),
+                ) {
                     val ratio = selectedWindow?.aspectRatio
                     if (selected != null && selectedWindow != null) {
                         key(selected) {
@@ -777,6 +791,7 @@ private fun SessionScreen(
                 }
                 if (!state.immersive && landscape) {
                     SessionSideRail(
+                        hardwareInsets = hardwareInsets,
                         windows = orderedWindows,
                         selected = selected,
                         hasWindow = selectedWindow != null,
