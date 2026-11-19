@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use waypane_core::{Connection, CoreEvent, WindowId};
+use waypane_core::{Connection, CoreEvent, WindowId, MAX_WAYLAND_SCALE};
 use waypane_render::{keys, DesktopRenderer};
 use waypipe_client::ClientConfig;
 use winit::application::ApplicationHandler;
@@ -130,9 +130,20 @@ impl App {
                     renderer.window_request(session, id, request);
                 }
                 CoreEvent::WindowConfigured { .. } => {}
-                CoreEvent::Frame(frame) => renderer
-                    .apply_frame(event_loop, session, &frame)
-                    .map_err(|error| error.to_string())?,
+                CoreEvent::Frame(frame) => {
+                    if let Some(scale_factor) = renderer
+                        .apply_frame(event_loop, session, &frame)
+                        .map_err(|error| error.to_string())?
+                    {
+                        connection
+                            .compositor_mut()
+                            .set_window_scale(
+                                frame.window_id,
+                                wayland_scale_from_factor(scale_factor),
+                            )
+                            .map_err(|error| error.to_string())?;
+                    }
+                }
                 CoreEvent::ClipboardChanged { source, mime_types } => {
                     if source.is_some() {
                         let outgoing = connection
@@ -326,10 +337,14 @@ impl ApplicationHandler<SessionEvent> for App {
                 else {
                     return;
                 };
-                connection
-                    .compositor_mut()
-                    .configure_window(core_id, Some(logical), vec![4])
+                let compositor = connection.compositor_mut();
+                compositor
+                    .set_window_scale(core_id, wayland_scale_from_factor(scale))
+                    .and_then(|()| compositor.configure_window(core_id, Some(logical), vec![4]))
             }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => connection
+                .compositor_mut()
+                .set_window_scale(core_id, wayland_scale_from_factor(scale_factor)),
             WindowEvent::Focused(focused) => connection
                 .compositor_mut()
                 .keyboard_focus(focused.then_some(core_id)),
@@ -435,5 +450,39 @@ impl ApplicationHandler<SessionEvent> for App {
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, _cause: winit::event::StartCause) {
         event_loop.set_control_flow(ControlFlow::Wait);
+    }
+}
+
+fn wayland_scale_from_factor(scale_factor: f64) -> i32 {
+    if !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return 1;
+    }
+    (scale_factor.ceil() as i32).clamp(1, MAX_WAYLAND_SCALE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn converts_host_scale_factor_to_integer_wayland_scale() {
+        for (factor, expected) in [
+            (f64::NAN, 1),
+            (f64::INFINITY, 1),
+            (0.0, 1),
+            (-1.0, 1),
+            (1.0, 1),
+            (1.01, 2),
+            (1.5, 2),
+            (2.0, 2),
+            (2.5, 3),
+            (100.0, MAX_WAYLAND_SCALE),
+        ] {
+            assert_eq!(
+                wayland_scale_from_factor(factor),
+                expected,
+                "unexpected scale for {factor}"
+            );
+        }
     }
 }

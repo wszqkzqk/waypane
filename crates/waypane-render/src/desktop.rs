@@ -223,7 +223,8 @@ impl DesktopRenderer {
         event_loop: &ActiveEventLoop,
         session: u64,
         frame: &Frame,
-    ) -> Result<(), DesktopError> {
+    ) -> Result<Option<f64>, DesktopError> {
+        let mut created_scale_factor = None;
         let native_id = if let Some(id) = self.ids.get(&(session, frame.window_id)) {
             *id
         } else {
@@ -254,6 +255,7 @@ impl DesktopRenderer {
             let window = Arc::new(event_loop.create_window(attributes)?);
             self.ensure_gpu(&window)?;
             let id = window.id();
+            created_scale_factor = Some(window.scale_factor());
             let native = NativeWindow::new(
                 info_session,
                 info.id,
@@ -280,7 +282,7 @@ impl DesktopRenderer {
                 frame_id: frame.id,
             },
         ));
-        Ok(())
+        Ok(created_scale_factor)
     }
 
     pub fn render(&mut self, id: winit::window::WindowId) {
