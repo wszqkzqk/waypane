@@ -3650,7 +3650,6 @@ name = "waypane-transport"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "log",
  "russh",
  "thiserror 2.0.21",
  "tokio",

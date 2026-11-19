@@ -25,15 +25,6 @@ pub enum Error {
     #[error("no SSH authentication method configured; add --identity or --password-env")]
     MissingAuthentication,
 
-    #[error("SSH {stage} timed out after {timeout:?} for {user}@{host}:{port}")]
-    Timeout {
-        user: String,
-        host: String,
-        port: u16,
-        stage: &'static str,
-        timeout: std::time::Duration,
-    },
-
     #[error("invalid remote configuration: {0}")]
     InvalidConfiguration(String),
 }

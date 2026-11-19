@@ -17,12 +17,8 @@ daemon is not required.
   official `wayland.xml`, `xdg-shell.xml`, and `text-input-v3.xml` definitions
 - `crates/waypane-transport`: `russh` authentication, SHA-256 host-key verification and TOFU,
   OpenSSH `streamlocal` forwarding, remote temporary-directory discovery, and automatic
-  `waypipe server` startup. Transport handshake, authentication, directory discovery, streamlocal
-  setup, session open, and remote command execution have stage-specific logs and 30-second
-  timeouts, paused while a user host-key prompt is pending; encrypted keys are decrypted in
-  `spawn_blocking`, and disconnect waits at most 5 seconds. If the remote command exits before the
-  first Waypipe stream is accepted, Android reports the exit status and a bounded tail of recent
-  output instead of leaving `Connecting over SSH…` forever
+  `waypipe server` startup; if the remote command exits before the first Waypipe stream is
+  accepted, Android reports an error instead of leaving `Connecting over SSH…` running indefinitely
 - `crates/waypane-render`: damage-aware software layer composition and `wgpu` textures; the
   `desktop` feature adds `winit` native windows
 - `apps/waypane-desktop`: desktop CLI, multi-session routing, native windows, input, and

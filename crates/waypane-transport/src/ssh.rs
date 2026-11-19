@@ -1,9 +1,7 @@
 use std::fmt;
-use std::future::Future;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
 
 use russh::client::{self, AuthResult, ChannelOpenHandle, Handle, Handler, Msg, Session};
 use russh::keys::{
@@ -18,7 +16,6 @@ use crate::remote::{RemoteSocket, RemoteWaypipe, MAX_REMOTE_SOCKET_BYTES};
 
 const REMOTE_DIRECTORY_COMMAND: &str = "if [ -n \"${TMPDIR:-}\" ] && [ -d \"$TMPDIR\" ] && [ -w \"$TMPDIR\" ]; then printf %s \"$TMPDIR\"; elif [ -n \"${XDG_RUNTIME_DIR:-}\" ] && [ -d \"$XDG_RUNTIME_DIR\" ] && [ -w \"$XDG_RUNTIME_DIR\" ]; then printf %s \"$XDG_RUNTIME_DIR\"; elif [ -d /tmp ] && [ -w /tmp ]; then printf %s /tmp; else exit 3; fi";
 const MAX_KNOWN_HOSTS_BYTES: usize = 4 * 1024 * 1024;
-const SSH_STAGE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub enum Authentication {
@@ -439,16 +436,6 @@ pub struct SshSession {
 
 impl SshSession {
     pub async fn connect(config: SshConfig, remote: &RemoteWaypipe) -> Result<Self> {
-        log::info!(
-            "Connecting to SSH endpoint {}@{}:{}",
-            config.user,
-            config.host,
-            config.port
-        );
-        let host_keys = match &config.host_key_policy {
-            HostKeyPolicy::Interactive(channel) => Some(channel.clone()),
-            _ => None,
-        };
         let (incoming_tx, incoming) = mpsc::channel(16);
         let handler = SshHandler {
             host: config.host.clone(),
@@ -461,85 +448,36 @@ impl SshSession {
             nodelay: true,
             ..Default::default()
         });
-        let mut handle = await_stage(
-            &config,
-            "transport handshake",
-            host_keys.as_ref(),
-            client::connect(client_config, (config.host.as_str(), config.port), handler),
-        )
-        .await?;
-        log::info!(
-            "SSH transport handshake complete for {}@{}:{}",
-            config.user,
-            config.host,
-            config.port
-        );
-        await_stage(
-            &config,
-            "authentication",
-            None,
-            authenticate(&mut handle, &config),
-        )
-        .await?;
-        log::info!(
-            "SSH authentication succeeded for {}@{}:{}",
-            config.user,
-            config.host,
-            config.port
-        );
+        let mut handle =
+            client::connect(client_config, (config.host.as_str(), config.port), handler).await?;
+        authenticate(&mut handle, &config).await?;
 
         let socket_path = match &remote.socket {
             RemoteSocket::Exact(path) => path.clone(),
             RemoteSocket::Auto { .. } => {
-                let directory = await_stage(
-                    &config,
-                    "remote directory discovery",
-                    None,
-                    exec_capture(&mut handle, REMOTE_DIRECTORY_COMMAND, MAX_REMOTE_SOCKET_BYTES + 1),
-                )
-                .await
-                .map_err(|error| {
-                    Error::InvalidConfiguration(format!(
-                        "could not discover a writable remote temporary directory; set an explicit remote socket path: {error}"
-                    ))
-                })?;
+                let directory =
+                    exec_capture(&mut handle, REMOTE_DIRECTORY_COMMAND, MAX_REMOTE_SOCKET_BYTES + 1)
+                        .await
+                        .map_err(|error| {
+                            Error::InvalidConfiguration(format!(
+                                "could not discover a writable remote temporary directory; set an explicit remote socket path: {error}"
+                            ))
+                        })?;
                 remote.socket_path_in(&directory)?
             }
         };
-        await_stage(
-            &config,
-            "remote streamlocal forwarding",
-            None,
-            async {
-                handle
-                    .streamlocal_forward(socket_path.clone())
-                    .await
-                    .map_err(Error::from)
-            },
-        )
-        .await
-        .map_err(|error| {
-            Error::InvalidConfiguration(format!(
-                "remote streamlocal forwarding for {socket_path} failed; enable AllowStreamLocalForwarding and AllowTcpForwarding remote or yes on the server: {error}"
-            ))
-        })?;
-        let channel = await_stage(&config, "opening remote session", None, async {
-            handle.channel_open_session().await.map_err(Error::from)
-        })
-        .await?;
-        await_stage(&config, "starting remote command", None, async {
-            channel
-                .exec(true, remote.command_line(&socket_path))
-                .await
-                .map_err(Error::from)
-        })
-        .await?;
-        log::info!(
-            "SSH remote command started for {}@{}:{} on {socket_path}",
-            config.user,
-            config.host,
-            config.port
-        );
+        handle
+            .streamlocal_forward(socket_path.clone())
+            .await
+            .map_err(|error| {
+                Error::InvalidConfiguration(format!(
+                    "sshd rejected remote streamlocal forwarding for {socket_path}; enable AllowStreamLocalForwarding and AllowTcpForwarding remote or yes on the server: {error}"
+                ))
+            })?;
+        let channel = handle.channel_open_session().await?;
+        channel
+            .exec(true, remote.command_line(&socket_path))
+            .await?;
         let events = Some(watch_remote_command(channel));
 
         Ok(Self {
@@ -563,54 +501,14 @@ impl SshSession {
     }
 
     pub async fn shutdown(self) -> Result<()> {
-        let handle = &self.handle;
-        let socket_path = self.remote_socket.clone();
-        let shutdown = async {
-            let _ = handle.cancel_streamlocal_forward(socket_path).await;
-            handle.disconnect(Disconnect::ByApplication, "", "en").await
-        };
-        tokio::time::timeout(Duration::from_secs(5), shutdown)
-            .await
-            .map_err(|_| {
-                Error::InvalidConfiguration("SSH disconnect timed out after 5s".to_string())
-            })??;
+        let _ = self
+            .handle
+            .cancel_streamlocal_forward(self.remote_socket)
+            .await;
+        self.handle
+            .disconnect(Disconnect::ByApplication, "", "en")
+            .await?;
         Ok(())
-    }
-}
-
-async fn await_stage<T>(
-    config: &SshConfig,
-    stage: &'static str,
-    host_keys: Option<&HostKeyChannel>,
-    future: impl Future<Output = Result<T>>,
-) -> Result<T> {
-    await_stage_with_timeout(config, stage, host_keys, SSH_STAGE_TIMEOUT, future).await
-}
-
-async fn await_stage_with_timeout<T>(
-    config: &SshConfig,
-    stage: &'static str,
-    host_keys: Option<&HostKeyChannel>,
-    timeout: Duration,
-    future: impl Future<Output = Result<T>>,
-) -> Result<T> {
-    let mut future = Box::pin(future);
-    loop {
-        let timer = Box::pin(tokio::time::sleep(timeout));
-        tokio::select! {
-            result = &mut future => return result,
-            _ = timer => {
-                if host_keys.is_none_or(|channel| !channel.is_pending()) {
-                    return Err(Error::Timeout {
-                        user: config.user.clone(),
-                        host: config.host.clone(),
-                        port: config.port,
-                        stage,
-                        timeout,
-                    });
-                }
-            }
-        }
     }
 }
 
@@ -700,19 +598,7 @@ async fn authenticate_key(
     path: &Path,
     passphrase: Option<&str>,
 ) -> Result<()> {
-    let owned_path = path.to_owned();
-    let owned_passphrase = passphrase.map(str::to_owned);
-    let key = tokio::task::spawn_blocking(move || {
-        load_secret_key(&owned_path, owned_passphrase.as_deref())
-    })
-    .await
-    .map_err(|error| {
-        Error::InvalidConfiguration(format!(
-            "SSH private key loading task failed for {}: {error}",
-            path.display()
-        ))
-    })?
-    .map_err(|error| {
+    let key = load_secret_key(path, passphrase).map_err(|error| {
         let passphrase_note = if passphrase.is_some() {
             "with the supplied passphrase"
         } else {
@@ -998,78 +884,6 @@ mod tests {
         );
         assert!(result.unwrap_err().to_string().contains("cancelled"));
         assert!(!channel.is_pending());
-    }
-
-    fn stage_config() -> SshConfig {
-        SshConfig {
-            host: "unreachable.test".to_string(),
-            port: 22,
-            user: "alice".to_string(),
-            authentication: Authentication::Password(String::new()),
-            known_hosts: None,
-            host_key_policy: HostKeyPolicy::Check,
-        }
-    }
-
-    #[tokio::test]
-    async fn stage_timeout_reports_stage_and_endpoint() {
-        let config = stage_config();
-        let error = await_stage_with_timeout(
-            &config,
-            "authentication",
-            None,
-            Duration::from_millis(5),
-            std::future::pending::<Result<()>>(),
-        )
-        .await
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            Error::Timeout {
-                stage: "authentication",
-                ..
-            }
-        ));
-        let message = error.to_string();
-        assert!(
-            message.contains("authentication")
-                && message.contains("alice@unreachable.test:22")
-                && message.contains("5ms"),
-            "{message}"
-        );
-    }
-
-    #[tokio::test]
-    async fn host_key_prompt_pauses_stage_timeout() {
-        let (channel, mut prompts) = HostKeyChannel::new();
-        let _decision = channel
-            .register(HostKeyPrompt {
-                host: "example.test".to_string(),
-                port: 22,
-                algorithm: "ssh-ed25519".to_string(),
-                fingerprint: "SHA256:test".to_string(),
-                changed: false,
-            })
-            .unwrap();
-        let stage = tokio::spawn({
-            let channel = channel.clone();
-            async move {
-                await_stage_with_timeout(
-                    &stage_config(),
-                    "transport handshake",
-                    Some(&channel),
-                    Duration::from_millis(10),
-                    std::future::pending::<Result<()>>(),
-                )
-                .await
-            }
-        });
-        tokio::time::sleep(Duration::from_millis(25)).await;
-        assert!(!stage.is_finished());
-        assert_eq!(prompts.recv().await.unwrap().host, "example.test");
-        channel.cancel();
-        let error = stage.await.unwrap().unwrap_err();
-        assert!(matches!(error, Error::Timeout { .. }));
     }
 
     #[test]
