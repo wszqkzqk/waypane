@@ -53,7 +53,8 @@ and static content does not run a 60 Hz polling loop.
   `wl_output`, `wl_data_device_manager`, `xdg_wm_base`, `xdg_toplevel`, `xdg_popup`,
   `xdg_positioner`, and `zwp_text_input_manager_v3`
 - Double-buffered surface state, ARGB/XRGB conversion, all eight buffer transforms, alpha
-  composition, and damage-only uploads
+  composition, and damage-only uploads; `wl_shm_pool` keeps its logical size independent of
+  a potentially larger backing fd, with non-shrinking bounded resizes as used by Waypipe C
 - Subsurface `place_above`/`place_below`, `set_sync`/`set_desync`, synchronized parent
   caches, z-order composition, and popup/subsurface hit testing
 - Toplevel and popup native windows, maximize/fullscreen/minimize, interactive resize, and
