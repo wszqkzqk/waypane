@@ -121,6 +121,30 @@ fun WaypaneApp(model: WaypaneViewModel) {
 }
 
 @Composable
+private fun SettingSwitch(
+    title: String,
+    description: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title)
+            Text(
+                description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+@Composable
 private fun SetupScreen(model: WaypaneViewModel) {
     val context = LocalContext.current
     var host by rememberSaveable { mutableStateOf("127.0.0.1") }
@@ -314,21 +338,12 @@ private fun SetupScreen(model: WaypaneViewModel) {
                 )
             }
         }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("Auto-resize remote windows")
-                Text(
-                    "Off preserves the remote desktop geometry. On asks applications to match the display area; their actual buffer size is still respected.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Switch(checked = autoResize, onCheckedChange = { autoResize = it })
-        }
+        SettingSwitch(
+            title = "Auto-resize remote windows",
+            description = "Off preserves the remote desktop geometry. On asks applications to match the display area; their actual buffer size is still respected.",
+            checked = autoResize,
+            onCheckedChange = { autoResize = it },
+        )
         OutlinedTextField(
             remoteSocket,
             { remoteSocket = it },
@@ -475,6 +490,7 @@ private fun SessionScreen(model: WaypaneViewModel, state: UiState) {
                                 ).also { surfaceView = it }
                             },
                             update = { view ->
+                                view.setDirectTouch(state.directTouch)
                                 view.updateContentAspectRatio(ratio ?: 1f)
                                 surfaceView = view
                             },
@@ -545,9 +561,12 @@ private fun SessionScreen(model: WaypaneViewModel, state: UiState) {
     if (selected != null && showWindowMenu) {
         WindowOptionsDialog(
             autoResize = state.autoResize,
+            directTouch = state.directTouch,
             immersive = state.immersive,
             onAutoResizeChange = model::setAutoResize,
+            onDirectTouchChange = model::setDirectTouch,
             onFit = { surfaceView?.resetViewport() },
+            onShowKeyboard = { surfaceView?.showKeyboard() },
             onToggleImmersive = model::toggleImmersive,
             onCloseWindow = { model.closeWindow(selected) },
             onDismiss = { showWindowMenu = false },
@@ -558,9 +577,12 @@ private fun SessionScreen(model: WaypaneViewModel, state: UiState) {
 @Composable
 private fun WindowOptionsDialog(
     autoResize: Boolean,
+    directTouch: Boolean,
     immersive: Boolean,
     onAutoResizeChange: (Boolean) -> Unit,
+    onDirectTouchChange: (Boolean) -> Unit,
     onFit: () -> Unit,
+    onShowKeyboard: () -> Unit,
     onToggleImmersive: () -> Unit,
     onCloseWindow: () -> Unit,
     onDismiss: () -> Unit,
@@ -569,22 +591,22 @@ private fun WindowOptionsDialog(
         onDismissRequest = onDismiss,
         title = { Text("Window options") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Auto-resize remote windows")
-                        Text(
-                            "Ask the application to match the display area instead of preserving its own geometry.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Switch(checked = autoResize, onCheckedChange = onAutoResizeChange)
-                }
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                SettingSwitch(
+                    title = "Auto-resize remote windows",
+                    description = "Ask the application to match the display area instead of preserving its own geometry.",
+                    checked = autoResize,
+                    onCheckedChange = onAutoResizeChange,
+                )
+                SettingSwitch(
+                    title = "Direct touch input",
+                    description = "Send native Wayland touch events instead of pointer clicks. Leave off for most desktop applications.",
+                    checked = directTouch,
+                    onCheckedChange = onDirectTouchChange,
+                )
                 TextButton(
                     onClick = {
                         onFit()
@@ -593,6 +615,15 @@ private fun WindowOptionsDialog(
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text("Fit entire window")
+                }
+                TextButton(
+                    onClick = {
+                        onShowKeyboard()
+                        onDismiss()
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Show keyboard")
                 }
                 TextButton(
                     onClick = {

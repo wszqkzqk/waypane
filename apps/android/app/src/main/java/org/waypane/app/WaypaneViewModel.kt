@@ -64,6 +64,7 @@ data class UiState(
     val hostKeyPrompt: EngineEvent.HostKeyPrompt? = null,
     val immersive: Boolean = false,
     val autoResize: Boolean = false,
+    val directTouch: Boolean = false,
 )
 
 class WaypaneViewModel(application: Application) : AndroidViewModel(application) {
@@ -189,6 +190,7 @@ class WaypaneViewModel(application: Application) : AndroidViewModel(application)
             hostKeyPrompt = null,
             autoResize = profile.autoResize,
             immersive = false,
+            directTouch = false,
         )
         appendLog("Connecting to ${profile.host}:${profile.port}")
         viewModelScope.launch { consumeEvents(freshHandle) }
@@ -318,6 +320,10 @@ class WaypaneViewModel(application: Application) : AndroidViewModel(application)
 
     fun setAutoResize(enabled: Boolean) {
         uiState = uiState.copy(autoResize = enabled)
+    }
+
+    fun setDirectTouch(enabled: Boolean) {
+        uiState = uiState.copy(directTouch = enabled)
     }
 
     fun toggleImmersive() {

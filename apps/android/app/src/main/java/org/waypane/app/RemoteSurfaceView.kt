@@ -63,7 +63,18 @@ class RemoteSurfaceView(
     private var pendingVertical = 0f
     private val scrollDispatcher = Runnable { dispatchPendingScroll() }
     private val activePointers = mutableSetOf<Int>()
+    private var directTouch = false
+    private var pointerContact = false
+    private var pointerId = MotionEvent.INVALID_POINTER_ID
+    private var pointerStartX = 0f
+    private var pointerStartY = 0f
+    private var pointerX = 0f
+    private var pointerY = 0f
+    private var pointerDragging = false
+    private var longPressCompleted = false
+    private val longPressRightClick = Runnable { completeLongPressRightClick() }
     private val touchSlopPx = ViewConfiguration.get(context).scaledTouchSlop * 2f
+    private val longPressTimeoutMs = ViewConfiguration.getLongPressTimeout().toLong()
     private val inputMethodManager = context.getSystemService(InputMethodManager::class.java)
 
     private data class GestureGeometry(
@@ -165,6 +176,7 @@ class RemoteSurfaceView(
     override fun onDetachedFromWindow() {
         clearPendingScroll()
         val handle = handle()
+        if (handle != 0L) cancelRemoteInput(handle)
         if (attached) wakeNativeSurface(handle)
         attached = false
         holder.removeCallback(this)
@@ -283,18 +295,12 @@ class RemoteSurfaceView(
 
     private fun startViewportGesture(event: MotionEvent, handle: Long) {
         clearPendingScroll()
-        if (activePointers.isNotEmpty()) {
-            val cancelled = runCatching {
-                NativeBridge.nativeTouchCancel(handle, key.session, key.window)
-            }.getOrNull()
-            activePointers.clear()
-            if (cancelled != true) {
-                reportRenderError(
-                    "Failed to cancel remote touch before viewport gesture",
-                    IllegalStateException("Touch queue is closed or full"),
-                )
-                return
-            }
+        if (!cancelRemoteInput(handle)) {
+            reportRenderError(
+                "Failed to cancel remote input before viewport gesture",
+                IllegalStateException("Input queue is closed or full"),
+            )
+            return
         }
         viewportGesture = true
         val geometry = gestureGeometry(event)
@@ -465,15 +471,48 @@ class RemoteSurfaceView(
         applyViewport(MIN_VIEWPORT_ZOOM, 0f, 0f)
     }
 
-    private fun panLimits(zoom: Float): Pair<Float, Float> {
-        if (width <= 0 || height <= 0) return 0f to 0f
+    fun setDirectTouch(enabled: Boolean) {
+        if (directTouch == enabled) return
+        val handle = handle()
+        if (handle != 0L && !cancelRemoteInput(handle)) {
+            reportRenderError(
+                "Failed to cancel remote input before changing input mode",
+                IllegalStateException("Input queue is closed or full"),
+            )
+        }
+        directTouch = enabled
+    }
+
+    fun showKeyboard() {
+        requestFocus()
+        post {
+            if (isAttachedToWindow) {
+                inputMethodManager?.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
+            }
+        }
+    }
+
+    private fun drawSize(zoom: Float): Pair<Float, Float> {
         val viewAspect = width.toFloat() / height.toFloat()
         val bufferAspect = contentAspectRatio.coerceAtLeast(0.0001f)
-        val (drawWidth, drawHeight) = if (bufferAspect >= viewAspect) {
+        return if (bufferAspect >= viewAspect) {
             zoom to zoom * viewAspect / bufferAspect
         } else {
             zoom * bufferAspect / viewAspect to zoom
         }
+    }
+
+    private fun isInsideContent(x: Float, y: Float): Boolean {
+        if (width <= 0 || height <= 0) return false
+        val (drawWidth, drawHeight) = drawSize(zoom)
+        val left = (1f - drawWidth) * 0.5f + panX
+        val top = (1f - drawHeight) * 0.5f + panY
+        return (x - left) / drawWidth in 0f..1f && (y - top) / drawHeight in 0f..1f
+    }
+
+    private fun panLimits(zoom: Float): Pair<Float, Float> {
+        if (width <= 0 || height <= 0) return 0f to 0f
+        val (drawWidth, drawHeight) = drawSize(zoom)
         return ((drawWidth - 1f).coerceAtLeast(0f) * 0.5f) to
             ((drawHeight - 1f).coerceAtLeast(0f) * 0.5f)
     }
@@ -516,30 +555,135 @@ class RemoteSurfaceView(
     }
 
     private fun handleRemoteTouch(event: MotionEvent, handle: Long): Boolean {
+        return if (directTouch) handleDirectTouch(event, handle) else handlePointerTouch(event, handle)
+    }
+
+    private fun handlePointerTouch(event: MotionEvent, handle: Long): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                if (!cancelRemoteInput(handle)) {
+                    reportRenderError(
+                        "Failed to reset remote input before pointer gesture",
+                        IllegalStateException("Input queue is closed or full"),
+                    )
+                    return true
+                }
+                requestFocus()
+                val index = event.actionIndex
+                pointerId = event.getPointerId(index)
+                pointerStartX = event.getX(index)
+                pointerStartY = event.getY(index)
+                pointerX = pointerStartX / width
+                pointerY = pointerStartY / height
+                pointerContact = isInsideContent(pointerX, pointerY)
+                pointerDragging = false
+                longPressCompleted = false
+                if (pointerContact) {
+                    sendRemotePointer(handle, pointerX, pointerY, NO_BUTTON, false)
+                    postDelayed(longPressRightClick, longPressTimeoutMs)
+                }
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (!pointerContact) return true
+                val index = event.findPointerIndex(pointerId)
+                if (index < 0 || longPressCompleted) return true
+                pointerX = event.getX(index) / width
+                pointerY = event.getY(index) / height
+                if (!pointerDragging &&
+                    hypot(event.getX(index) - pointerStartX, event.getY(index) - pointerStartY) > touchSlopPx
+                ) {
+                    pointerDragging = true
+                    removeCallbacks(longPressRightClick)
+                    val startX = pointerStartX / width
+                    val startY = pointerStartY / height
+                    sendRemotePointer(handle, startX, startY, NO_BUTTON, false)
+                    sendRemotePointer(handle, startX, startY, LINUX_BUTTON_LEFT, true)
+                }
+                sendRemotePointer(handle, pointerX, pointerY, NO_BUTTON, false)
+            }
+            MotionEvent.ACTION_UP -> {
+                val index = event.actionIndex
+                if (pointerContact && event.getPointerId(index) == pointerId && !longPressCompleted) {
+                    pointerX = event.getX(index) / width
+                    pointerY = event.getY(index) / height
+                    if (pointerDragging) {
+                        sendRemotePointer(handle, pointerX, pointerY, LINUX_BUTTON_LEFT, false)
+                    } else {
+                        sendRemotePointer(handle, pointerX, pointerY, LINUX_BUTTON_LEFT, true)
+                        sendRemotePointer(handle, pointerX, pointerY, LINUX_BUTTON_LEFT, false)
+                    }
+                }
+                resetPointerGesture()
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                if (!cancelRemoteInput(handle)) {
+                    Log.d(TAG, "Pointer cancellation skipped because the input queue is closed or full")
+                }
+            }
+            else -> return super.onTouchEvent(event)
+        }
+        return true
+    }
+
+    private fun completeLongPressRightClick() {
+        val handle = handle()
+        if (!pointerContact || pointerDragging || handle == 0L) return
+        longPressCompleted = true
+        sendRemotePointer(handle, pointerX, pointerY, LINUX_BUTTON_RIGHT, true)
+        sendRemotePointer(handle, pointerX, pointerY, LINUX_BUTTON_RIGHT, false)
+    }
+
+    private fun cancelRemoteInput(handle: Long): Boolean {
+        removeCallbacks(longPressRightClick)
+        var accepted = true
+        if (activePointers.isNotEmpty() && handle != 0L) {
+            accepted = runCatching {
+                NativeBridge.nativeTouchCancel(handle, key.session, key.window)
+            }.getOrDefault(false)
+        }
+        activePointers.clear()
+        if (pointerDragging && handle != 0L) {
+            accepted = sendRemotePointer(handle, pointerX, pointerY, LINUX_BUTTON_LEFT, false) && accepted
+        }
+        resetPointerGesture()
+        return accepted
+    }
+
+    private fun resetPointerGesture() {
+        removeCallbacks(longPressRightClick)
+        pointerContact = false
+        pointerId = MotionEvent.INVALID_POINTER_ID
+        pointerDragging = false
+        longPressCompleted = false
+    }
+
+    private fun sendRemotePointer(
+        handle: Long,
+        x: Float,
+        y: Float,
+        button: Int,
+        pressed: Boolean,
+    ): Boolean = runCatching {
+        NativeBridge.nativePointer(handle, key.session, key.window, x, y, button, pressed)
+    }.onFailure { error ->
+        reportRenderError("Failed to forward Wayland pointer input", error)
+    }.getOrDefault(false)
+
+    private fun handleDirectTouch(event: MotionEvent, handle: Long): Boolean {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
                 requestFocus()
                 val index = event.actionIndex
                 val id = event.getPointerId(index)
                 activePointers += id
-                NativeBridge.nativeTouch(
-                    handle,
-                    key.session,
-                    key.window,
-                    id,
-                    TOUCH_DOWN,
-                    event.getX(index) / width,
-                    event.getY(index) / height,
-                )
+                sendRemoteTouch(handle, id, TOUCH_DOWN, event.getX(index) / width, event.getY(index) / height)
             }
             MotionEvent.ACTION_MOVE -> {
                 for (index in 0 until event.pointerCount) {
                     val id = event.getPointerId(index)
                     if (id in activePointers) {
-                        NativeBridge.nativeTouch(
+                        sendRemoteTouch(
                             handle,
-                            key.session,
-                            key.window,
                             id,
                             TOUCH_MOTION,
                             event.getX(index) / width,
@@ -549,28 +693,33 @@ class RemoteSurfaceView(
                 }
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
-                val id = event.getPointerId(event.actionIndex)
+                val index = event.actionIndex
+                val id = event.getPointerId(index)
                 activePointers -= id
-                NativeBridge.nativeTouch(
+                sendRemoteTouch(
                     handle,
-                    key.session,
-                    key.window,
                     id,
                     TOUCH_UP,
-                    event.getX(event.actionIndex) / width,
-                    event.getY(event.actionIndex) / height,
+                    event.getX(index) / width,
+                    event.getY(index) / height,
                 )
-                if (event.getToolType(event.actionIndex) != MotionEvent.TOOL_TYPE_MOUSE) {
-                    inputMethodManager?.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
-                }
             }
             MotionEvent.ACTION_CANCEL -> {
-                activePointers.clear()
-                NativeBridge.nativeTouchCancel(handle, key.session, key.window)
+                if (!cancelRemoteInput(handle)) {
+                    Log.d(TAG, "Touch cancellation skipped because the input queue is closed or full")
+                }
             }
             else -> return super.onTouchEvent(event)
         }
         return true
+    }
+
+    private fun sendRemoteTouch(handle: Long, id: Int, action: Int, x: Float, y: Float) {
+        runCatching {
+            NativeBridge.nativeTouch(handle, key.session, key.window, id, action, x, y)
+        }.onFailure { error ->
+            reportRenderError("Failed to forward Wayland touch input", error)
+        }
     }
 
     override fun onGenericMotionEvent(event: MotionEvent): Boolean {
@@ -736,6 +885,8 @@ class RemoteSurfaceView(
         private const val TOUCH_MOTION = 1
         private const val TOUCH_UP = 2
         private const val NO_BUTTON = -1
+        private const val LINUX_BUTTON_LEFT = 0x110
+        private const val LINUX_BUTTON_RIGHT = 0x111
         private const val DIRTY_WAIT_MS = 1_000
 
         private val renderThread = HandlerThread("WaypaneRender", Process.THREAD_PRIORITY_DISPLAY).apply {
