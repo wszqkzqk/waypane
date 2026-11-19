@@ -410,3 +410,50 @@ fn supports_shm_backing_larger_than_logical_pool() {
     assert!(error.contains("16384 to 8192"), "{error}");
     assert_eq!(compositor.pools[&60].size, 16384);
 }
+
+#[test]
+fn allows_empty_initial_commit_before_xdg_ack_configure() {
+    let mut fixture = Fixture::new();
+    {
+        let xdg = fixture.compositor.xdg_surfaces.get_mut(&20).unwrap();
+        xdg.initial_ack_seen = false;
+        xdg.configure_serial = Some(777);
+    }
+
+    fixture
+        .compositor
+        .commit_surface(&mut fixture.client, 10)
+        .unwrap();
+    assert!(!fixture.compositor.xdg_surfaces[&20].initial_ack_seen);
+
+    fixture
+        .compositor
+        .surfaces
+        .get_mut(&10)
+        .unwrap()
+        .pending
+        .attach = Some(None);
+    fixture
+        .compositor
+        .commit_surface(&mut fixture.client, 10)
+        .unwrap();
+    assert!(!fixture.compositor.xdg_surfaces[&20].initial_ack_seen);
+
+    fixture
+        .compositor
+        .surfaces
+        .get_mut(&10)
+        .unwrap()
+        .pending
+        .attach = Some(Some(51));
+    let error = fixture
+        .compositor
+        .commit_surface(&mut fixture.client, 10)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("attached a buffer before initial ack_configure"),
+        "{error}"
+    );
+    assert!(!fixture.compositor.xdg_surfaces[&20].initial_ack_seen);
+}

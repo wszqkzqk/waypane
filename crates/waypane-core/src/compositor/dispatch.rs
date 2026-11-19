@@ -835,15 +835,21 @@ impl Compositor {
     }
 
     fn commit_surface_now(&mut self, client: &mut Client, surface_id: u32) -> Result<()> {
-        if let Some(xdg_surface) = self
-            .xdg_surfaces
-            .values()
-            .find(|xdg| xdg.surface_id == surface_id && xdg.window_id.is_some())
-        {
-            if xdg_surface.configure_serial.is_some() && !xdg_surface.initial_ack_seen {
-                return Err(Error::protocol(
-                    "xdg_surface committed before initial ack_configure",
-                ));
+        let attaches_buffer = self
+            .surfaces
+            .get(&surface_id)
+            .is_some_and(|surface| surface.pending.attach.as_ref().is_some_and(Option::is_some));
+        if attaches_buffer {
+            if let Some(xdg_surface) = self
+                .xdg_surfaces
+                .values()
+                .find(|xdg| xdg.surface_id == surface_id && xdg.window_id.is_some())
+            {
+                if xdg_surface.configure_serial.is_some() && !xdg_surface.initial_ack_seen {
+                    return Err(Error::protocol(
+                        "xdg_surface attached a buffer before initial ack_configure",
+                    ));
+                }
             }
         }
 
