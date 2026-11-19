@@ -173,6 +173,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: android-aarch64
+      - name: Restore persistent CI debug signing key
+        if: github.event_name != 'pull_request'
+        uses: actions/cache@v6
+        with:
+          path: /home/runner/.android/debug.keystore
+          key: waypane-android-ci-debug-signing-v1
       - name: Build debug APK with the runner's latest NDK
         working-directory: apps/android
         run: |
