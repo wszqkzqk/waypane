@@ -3,6 +3,8 @@ mod gpu;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(target_os = "android")]
+use std::sync::Once;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -16,6 +18,48 @@ use waypipe_client::Compression;
 
 use crate::keycodes::android_keycode_to_evdev;
 use crate::{ActorCommand, ActorHandle, SessionId, SurfaceKey};
+
+#[cfg(target_os = "android")]
+fn init_logging() {
+    static START: Once = Once::new();
+    START.call_once(|| {
+        android_logger::init_once(
+            android_logger::Config::default()
+                .with_tag("WaypaneRust")
+                .with_max_level(log::LevelFilter::Info),
+        );
+        std::panic::set_hook(Box::new(|info| {
+            let payload = info.payload();
+            let message = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| {
+                    payload
+                        .downcast_ref::<&str>()
+                        .map(|value| (*value).to_owned())
+                })
+                .or_else(|| {
+                    payload
+                        .downcast_ref::<wgpu::Error>()
+                        .map(ToString::to_string)
+                })
+                .unwrap_or_else(|| "non-string panic payload".to_owned());
+            if let Some(location) = info.location() {
+                log::error!(
+                    "Rust panic at {}:{}:{}: {message}",
+                    location.file(),
+                    location.line(),
+                    location.column()
+                );
+            } else {
+                log::error!("Rust panic: {message}");
+            }
+        }));
+    });
+}
+
+#[cfg(not(target_os = "android"))]
+fn init_logging() {}
 
 struct NativeState {
     gpu: Mutex<GpuRenderer>,
@@ -112,6 +156,7 @@ pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeConnect(
     command: JString<'_>,
 ) -> jlong {
     jni_guard!(env, env, jlong, {
+        init_logging();
         let host = text(env, &host)?;
         let user = text(env, &user)?;
         if host.trim().is_empty() || user.trim().is_empty() {

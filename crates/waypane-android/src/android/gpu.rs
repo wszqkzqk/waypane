@@ -10,7 +10,8 @@ use waypane_core::Size;
 
 use crate::{ActorHandle, AndroidSurface, SurfaceKey};
 
-#[cfg_attr(target_os = "android", link(name = "android"))]
+#[cfg(target_os = "android")]
+#[link(name = "android")]
 unsafe extern "C" {
     fn ANativeWindow_fromSurface(
         env: *mut jni::sys::JNIEnv,
@@ -18,6 +19,19 @@ unsafe extern "C" {
     ) -> *mut c_void;
     fn ANativeWindow_release(window: *mut c_void);
 }
+
+#[cfg(not(target_os = "android"))]
+#[no_mangle]
+pub unsafe extern "C" fn ANativeWindow_fromSurface(
+    _env: *mut jni::sys::JNIEnv,
+    _surface: jni::sys::jobject,
+) -> *mut c_void {
+    std::ptr::null_mut()
+}
+
+#[cfg(not(target_os = "android"))]
+#[no_mangle]
+pub unsafe extern "C" fn ANativeWindow_release(_window: *mut c_void) {}
 
 #[derive(Debug)]
 struct NativeWindowRef(NonNull<c_void>);
@@ -175,6 +189,22 @@ impl Drop for NativeSurface {
     }
 }
 
+const PREFERRED_SURFACE_FORMATS: &[wgpu::TextureFormat] = &[
+    wgpu::TextureFormat::Rgba8UnormSrgb,
+    wgpu::TextureFormat::Bgra8UnormSrgb,
+    wgpu::TextureFormat::Rgba8Unorm,
+    wgpu::TextureFormat::Bgra8Unorm,
+];
+
+fn select_surface_format(capabilities: &wgpu::SurfaceCapabilities) -> Option<wgpu::TextureFormat> {
+    PREFERRED_SURFACE_FORMATS.iter().copied().find(|format| {
+        capabilities.formats.contains(format)
+            && capabilities
+                .usages
+                .contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
+    })
+}
+
 #[derive(Default)]
 pub struct GpuRenderer {
     instance: Option<wgpu::Instance>,
@@ -270,16 +300,52 @@ impl GpuRenderer {
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
                 .map_err(|error| format!("failed to create Android GPU device: {error}"))?;
-        let format = *surface
-            .get_capabilities(&adapter)
-            .formats
-            .first()
-            .ok_or_else(|| "Android surface has no supported formats".to_string())?;
-        log::info!("Android GPU adapter: {}", adapter.get_info().name);
+        let adapter_info = adapter.get_info();
+        let capabilities = surface.get_capabilities(&adapter);
+        let format = select_surface_format(&capabilities).ok_or_else(|| {
+            format!(
+                "Android GPU {} offers no Rgba8/Bgra8 render-attachment surface formats; advertised formats: {:?}",
+                adapter_info.name, capabilities.formats
+            )
+        })?;
+        log::info!(
+            "Android GPU adapter: {}; selected surface format {format:?}; advertised formats: {:?}",
+            adapter_info.name,
+            capabilities.formats
+        );
         self.instance = Some(instance);
         self.device = Some(device);
         self.queue = Some(queue);
         self.format = Some(format);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skips_compressed_android_surface_formats() {
+        let compressed = wgpu::TextureFormat::Astc {
+            block: wgpu::AstcBlock::B4x4,
+            channel: wgpu::AstcChannel::Unorm,
+        };
+        let mut capabilities = wgpu::SurfaceCapabilities {
+            formats: vec![
+                compressed,
+                wgpu::TextureFormat::Bgra8Unorm,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+            ],
+            usages: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            ..Default::default()
+        };
+        assert_eq!(
+            select_surface_format(&capabilities),
+            Some(wgpu::TextureFormat::Rgba8UnormSrgb)
+        );
+
+        capabilities.formats = vec![compressed];
+        assert_eq!(select_surface_format(&capabilities), None);
     }
 }
