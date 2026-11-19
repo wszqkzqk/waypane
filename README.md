@@ -84,10 +84,14 @@ and static content does not run a 60 Hz polling loop.
   remote-socket overrides; application commands remain separate from Waypipe options
 - Android atomic SAF private-key import with a 64 KiB limit, owner-only app-private storage,
   backup exclusion for keys and `known_hosts`, and a true delete-imported-key action
-- Android presentation selects only `RENDER_ATTACHMENT`-compatible RGBA/BGRA 8-bit formats
-  rather than blindly taking the first Vulkan format (which can be compressed ASTC on Mali).
-  RenderThread JNI errors are caught and shown in the UI instead of crashing; `WaypaneRust`
-  and `WaypaneRender` Logcat tags expose adapter/format, panic location, and GPU errors
+- Android acquires each `ANativeWindow` once and runs adapter selection, capability
+  negotiation, configuration, and presentation on the same surface. `SurfacePlan` requires an
+  RGBA/BGRA 8-bit format and `RENDER_ATTACHMENT` usage, keeps alpha/present mode/color space in
+  `Auto` (including devices advertising only `Inherit`), and turns configure failures into
+  ordinary errors through wgpu error scopes. Resources drop in strict order: texture/blitter,
+  wgpu surface, `ANativeWindow`, Java surface. `Outdated`/`Timeout` results retry while dirty,
+  occluded results wait for visibility callbacks, and RenderThread JNI errors are shown in the
+  UI instead of crashing; `WaypaneRust` and `WaypaneRender` expose adapter/format and GPU errors
 
 ## Build and test
 
