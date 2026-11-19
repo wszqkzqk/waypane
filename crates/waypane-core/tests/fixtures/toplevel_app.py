@@ -63,9 +63,12 @@ def track_input(object_id, opcode):
         serial = struct.unpack_from("<I", payload)[0]
         sock.sendall(message(24, 0, struct.pack("<IIii", serial, 0, 0, 0)))
     if object_id == 13 and opcode == 3:
-        saw_key = True
+        assert len(payload) == 16, (
+            f"wl_keyboard.key payload has {len(payload)} bytes: {payload.hex()}"
+        )
         _, _, key, state = struct.unpack("<IIII", payload)
         assert (key, state) == (42, 1)
+        saw_key = True
 
 
 def wait_done(callback_id):
