@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
@@ -7,6 +7,8 @@ use waypipe_client::{Client, ClientConfig, ClientEvent, Rid};
 use crate::compositor::Compositor;
 use crate::error::{Error, Result};
 use crate::types::{CoreEvent, FrameId, DEFAULT_KEYMAP};
+
+const MAX_PENDING_FRAME_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct CoreBatch {
@@ -37,6 +39,7 @@ impl Connection {
         let batch = self.client.receive(input)?;
         let mut outgoing = BytesMut::from(batch.outgoing.as_ref());
         let mut events = Vec::new();
+        let mut allocations = BTreeMap::new();
         for event in batch.events {
             match event {
                 ClientEvent::Negotiated {
@@ -55,6 +58,7 @@ impl Connection {
                 ClientEvent::Protocol(messages) => {
                     self.compositor
                         .process(&mut self.client, &messages, &mut self.rids)?;
+                    drain_events(&mut self.compositor, &mut events, &mut allocations)?;
                 }
                 ClientEvent::Closed => events.push(CoreEvent::Closed),
             }
@@ -66,7 +70,7 @@ impl Connection {
             )));
         }
         self.client.resources_mut().clear_damage();
-        events.extend(self.compositor.take_events());
+        drain_events(&mut self.compositor, &mut events, &mut allocations)?;
         outgoing.extend_from_slice(&self.flush()?);
         Ok(CoreBatch {
             outgoing: outgoing.freeze(),
@@ -113,4 +117,31 @@ impl Connection {
     pub fn compositor_mut(&mut self) -> &mut Compositor {
         &mut self.compositor
     }
+}
+
+fn drain_events(
+    compositor: &mut Compositor,
+    events: &mut Vec<CoreEvent>,
+    allocations: &mut BTreeMap<usize, usize>,
+) -> Result<()> {
+    for event in compositor.take_events() {
+        if let CoreEvent::Frame(frame) = &event {
+            if let Some(buffer) = &frame.buffer {
+                allocations
+                    .entry(buffer.data.allocation_id())
+                    .or_insert(buffer.data.len());
+            }
+        }
+        events.push(event);
+    }
+    let total = allocations
+        .values()
+        .try_fold(0usize, |total, size| total.checked_add(*size))
+        .ok_or_else(|| Error::protocol("pending frame snapshot size overflow"))?;
+    if total > MAX_PENDING_FRAME_BYTES {
+        return Err(Error::protocol(format!(
+            "pending frame snapshots require {total} bytes, exceeding limit {MAX_PENDING_FRAME_BYTES}"
+        )));
+    }
+    Ok(())
 }

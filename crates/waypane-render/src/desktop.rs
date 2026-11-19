@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use waypane_core::{Frame, WindowId, WindowInfo, WindowKind};
-use waypipe_client::ResourceStore;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowLevel};
@@ -81,15 +80,10 @@ impl NativeWindow {
     fn upload(
         &mut self,
         frame: &Frame,
-        store: &ResourceStore,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) -> Result<(), DesktopError> {
-        let pool = frame
-            .buffer
-            .as_ref()
-            .and_then(|buffer| store.data(buffer.rid));
-        let uploads = self.canvas.apply_frame(frame, pool)?;
+        let uploads = self.canvas.apply_frame(frame)?;
         let size = self.canvas.size();
         if size.width > 0 && size.height > 0 && self.texture_size != size {
             self.texture = Some(device.create_texture(&wgpu::TextureDescriptor {
@@ -229,7 +223,6 @@ impl DesktopRenderer {
         event_loop: &ActiveEventLoop,
         session: u64,
         frame: &Frame,
-        store: &ResourceStore,
     ) -> Result<(), DesktopError> {
         let native_id = if let Some(id) = self.ids.get(&(session, frame.window_id)) {
             *id
@@ -277,7 +270,6 @@ impl DesktopRenderer {
         let window = self.windows.get_mut(&native_id).unwrap();
         window.upload(
             frame,
-            store,
             self.device.as_ref().unwrap(),
             self.queue.as_ref().unwrap(),
         )?;

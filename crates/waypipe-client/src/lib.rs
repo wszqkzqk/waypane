@@ -12,7 +12,7 @@ pub use header::{
     Compression, ConnectionHeader, VideoCodec, MIN_PROTOCOL_VERSION, WAYPIPE_PROTOCOL_VERSION,
 };
 pub use store::{
-    PipeAccess, PipeOpenKind, PipeRead, ResourceStore, Rid, DEFAULT_MAX_PIPE_BUFFER_SIZE,
+    PipeAccess, PipeOpenKind, PipeRead, ResourceStore, Rid, ShmData, DEFAULT_MAX_PIPE_BUFFER_SIZE,
     DEFAULT_MAX_SHM_FILE_SIZE, DEFAULT_MAX_TOTAL_SHM_SIZE,
 };
 pub use wire::{

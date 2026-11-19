@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -155,6 +155,7 @@ pub struct AndroidSurface {
     pub viewport: Viewport,
     view_size: Size,
     touch_active: bool,
+    pointer_buttons: BTreeSet<u32>,
     scale: i32,
     frames: VecDeque<(u64, u64)>,
 }
@@ -171,6 +172,7 @@ impl AndroidSurface {
                 height: 1,
             },
             touch_active: false,
+            pointer_buttons: BTreeSet::new(),
             scale: 1,
             frames: VecDeque::new(),
         }
@@ -576,17 +578,48 @@ impl AndroidEngine {
         y: f64,
         button: Option<(u32, bool)>,
     ) -> Result<EngineOutput, EngineError> {
-        let Some((x, y)) = self.logical_point(key, x, y)? else {
-            return Ok(EngineOutput::default());
+        let logical = self.logical_point(key, x, y)?;
+        let surface = self.surface(key).ok_or(EngineError::UnknownSurface(key))?;
+        let (point, button) = {
+            let mut surface = surface
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match logical {
+                Some(point) => {
+                    if let Some((button, pressed)) = button {
+                        if pressed {
+                            surface.pointer_buttons.insert(button);
+                        } else {
+                            surface.pointer_buttons.remove(&button);
+                        }
+                    }
+                    (Some(point), button)
+                }
+                None => match button {
+                    Some((button, false)) if surface.pointer_buttons.contains(&button) => {
+                        surface.pointer_buttons.remove(&button);
+                        (None, Some((button, false)))
+                    }
+                    _ => return Ok(EngineOutput::default()),
+                },
+            }
         };
+
         let time = self.millis();
         let connection = self
             .connections
             .get_mut(&key.session)
             .ok_or(EngineError::UnknownSession(key.session))?;
-        connection
-            .compositor_mut()
-            .pointer_motion(key.window, x, y, time)?;
+        if let Some((x, y)) = point {
+            connection
+                .compositor_mut()
+                .pointer_motion(key.window, x, y, time)?;
+        }
+        if let Some((_, true)) = button {
+            connection
+                .compositor_mut()
+                .keyboard_focus(Some(key.window))?;
+        }
         if let Some((button, pressed)) = button {
             connection
                 .compositor_mut()
@@ -922,21 +955,10 @@ impl AndroidEngine {
 
     fn apply_frame(&mut self, key: SurfaceKey, frame: &Frame) -> Result<(), EngineError> {
         let surface = self.surface(key).ok_or(EngineError::UnknownSurface(key))?;
-        let pool = frame
-            .buffer
-            .as_ref()
-            .and_then(|buffer| {
-                self.connections
-                    .get(&key.session)?
-                    .client()
-                    .resources()
-                    .data(buffer.rid)
-            })
-            .map(|data| data.to_vec());
         let mut surface = surface
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        surface.canvas.apply_frame(frame, pool.as_deref())?;
+        surface.canvas.apply_frame(frame)?;
         if frame.parent.is_none() {
             if let Some(buffer) = &frame.buffer {
                 surface.scale = buffer.scale.max(1);
@@ -984,7 +1006,13 @@ mod tests {
         })
     }
 
-    fn frame(window: WindowId, surface: WindowId, rid: waypipe_client::Rid) -> CoreEvent {
+    fn frame(
+        engine: &AndroidEngine,
+        session: SessionId,
+        window: WindowId,
+        surface: WindowId,
+        rid: waypipe_client::Rid,
+    ) -> CoreEvent {
         CoreEvent::Frame(Frame {
             id: surface as u64,
             window_id: window,
@@ -992,6 +1020,11 @@ mod tests {
             parent: None,
             buffer: Some(BufferView {
                 rid,
+                data: engine.connections[&session]
+                    .client()
+                    .resources()
+                    .shared_data(rid)
+                    .unwrap(),
                 offset: 0,
                 width: 1,
                 height: 1,
@@ -1052,7 +1085,13 @@ mod tests {
             engine
                 .apply_core_events(
                     session,
-                    vec![frame(10, 20, waypipe_client::Rid(session as i32))],
+                    vec![frame(
+                        &engine,
+                        session,
+                        10,
+                        20,
+                        waypipe_client::Rid(session as i32),
+                    )],
                 )
                 .unwrap();
         }
@@ -1142,14 +1181,14 @@ mod tests {
             .unwrap();
         open_pool(&mut engine, 1, waypipe_client::Rid(1), [0, 0, 0, 0]);
         engine
-            .apply_core_events(1, vec![frame(10, 11, waypipe_client::Rid(1))])
+            .apply_core_events(1, vec![frame(&engine, 1, 10, 11, waypipe_client::Rid(1))])
             .unwrap();
         engine
             .apply_core_events(
                 1,
                 vec![
                     window(1, 20, WindowKind::Popup { parent: 10 }),
-                    frame(20, 21, waypipe_client::Rid(1)),
+                    frame(&engine, 1, 20, 21, waypipe_client::Rid(1)),
                 ],
             )
             .unwrap();
@@ -1176,7 +1215,7 @@ mod tests {
             .unwrap();
         open_pool(&mut engine, 1, waypipe_client::Rid(1), [0, 0, 0, 0]);
         engine
-            .apply_core_events(1, vec![frame(1, 10, waypipe_client::Rid(1))])
+            .apply_core_events(1, vec![frame(&engine, 1, 1, 10, waypipe_client::Rid(1))])
             .unwrap();
 
         let surface = engine.surface(key).unwrap();
@@ -1244,6 +1283,15 @@ mod tests {
         assert!(!surface.lock().unwrap().touch_active);
         let ignored_up = engine.touch_up(key, 0, 0.5, 0.5).unwrap();
         assert!(ignored_up.outgoing.is_empty());
+
+        engine.pointer(key, 0.1, 0.5, Some((0x110, true))).unwrap();
+        assert!(surface.lock().unwrap().pointer_buttons.is_empty());
+        engine.pointer(key, 0.5, 0.5, Some((0x110, true))).unwrap();
+        assert!(surface.lock().unwrap().pointer_buttons.contains(&0x110));
+        engine.pointer(key, 0.1, 0.5, None).unwrap();
+        assert!(surface.lock().unwrap().pointer_buttons.contains(&0x110));
+        engine.pointer(key, 0.1, 0.5, Some((0x110, false))).unwrap();
+        assert!(!surface.lock().unwrap().pointer_buttons.contains(&0x110));
         assert!(engine.connections.contains_key(&1));
     }
 }

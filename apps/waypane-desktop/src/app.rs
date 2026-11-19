@@ -131,7 +131,7 @@ impl App {
                 }
                 CoreEvent::WindowConfigured { .. } => {}
                 CoreEvent::Frame(frame) => renderer
-                    .apply_frame(event_loop, session, &frame, connection.client().resources())
+                    .apply_frame(event_loop, session, &frame)
                     .map_err(|error| error.to_string())?,
                 CoreEvent::ClipboardChanged { source, mime_types } => {
                     if source.is_some() {

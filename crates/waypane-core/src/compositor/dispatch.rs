@@ -1109,7 +1109,7 @@ impl Compositor {
         };
         let data = client
             .resources()
-            .data(buffer.rid)
+            .shared_data(buffer.rid)
             .ok_or_else(|| Error::protocol("buffer backing resource has disappeared"))?;
         if required > data.len() {
             return Err(Error::protocol("buffer exceeds shared-memory pool"));
@@ -1149,6 +1149,7 @@ impl Compositor {
 
         Ok(BufferView {
             rid: buffer.rid,
+            data,
             offset: buffer.offset,
             width: buffer.width,
             height: buffer.height,

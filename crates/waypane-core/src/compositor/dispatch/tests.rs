@@ -457,3 +457,44 @@ fn allows_empty_initial_commit_before_xdg_ack_configure() {
     );
     assert!(!fixture.compositor.xdg_surfaces[&20].initial_ack_seen);
 }
+
+#[test]
+fn queued_frame_keeps_its_shm_snapshot_after_diff_and_pool_close() {
+    let mut fixture = Fixture::new();
+    fixture
+        .compositor
+        .surfaces
+        .get_mut(&10)
+        .unwrap()
+        .pending
+        .attach = Some(Some(51));
+    fixture
+        .compositor
+        .commit_surface(&mut fixture.client, 10)
+        .unwrap();
+    let events = fixture.compositor.take_events();
+    let CoreEvent::Frame(frame) = &events[0] else {
+        panic!("expected a root frame");
+    };
+    let snapshot = frame.buffer.as_ref().unwrap().data.clone();
+    assert_eq!(&*snapshot, &[0, 255, 0, 0]);
+
+    fixture
+        .client
+        .resources_mut()
+        .apply_fill(
+            Rid(1),
+            &[0, 0, 0, 0, 4, 0, 0, 0, 255, 0, 0, 0],
+            Compression::None,
+        )
+        .unwrap();
+    assert_eq!(&*snapshot, &[0, 255, 0, 0]);
+    assert_eq!(
+        fixture.client.resources().data(Rid(1)),
+        Some(&[255, 0, 0, 0][..])
+    );
+
+    assert!(fixture.client.resources_mut().close_resource(Rid(1)));
+    assert_eq!(fixture.client.resources().data(Rid(1)), None);
+    assert_eq!(&*snapshot, &[0, 255, 0, 0]);
+}

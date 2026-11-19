@@ -1,4 +1,4 @@
-use waypipe_client::Rid;
+use waypipe_client::{Rid, ShmData};
 
 pub type WindowId = u32;
 pub type SurfaceId = u32;
@@ -33,6 +33,7 @@ pub enum ShmFormat {
 #[derive(Debug, Clone)]
 pub struct BufferView {
     pub rid: Rid,
+    pub data: ShmData,
     pub offset: i32,
     pub width: i32,
     pub height: i32,

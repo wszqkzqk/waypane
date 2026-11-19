@@ -58,9 +58,32 @@ pub struct PipeRead {
     pub eof: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ShmData(Arc<Vec<u8>>);
+
+impl ShmData {
+    pub fn allocation_id(&self) -> usize {
+        Arc::as_ptr(&self.0) as usize
+    }
+}
+
+impl std::ops::Deref for ShmData {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_slice()
+    }
+}
+
+impl From<Vec<u8>> for ShmData {
+    fn from(data: Vec<u8>) -> Self {
+        Self(Arc::new(data))
+    }
+}
+
 #[derive(Debug)]
 struct RemoteFile {
-    data: Vec<u8>,
+    data: Arc<Vec<u8>>,
     damage: Vec<Range<usize>>,
 }
 
@@ -127,7 +150,7 @@ impl ResourceStore {
         self.remote_files.insert(
             rid,
             RemoteFile {
-                data: vec![0; size],
+                data: Arc::new(vec![0; size]),
                 damage: Vec::new(),
             },
         );
@@ -169,7 +192,7 @@ impl ResourceStore {
         }
         let size = self.validate_new_allocation(size, old_size)?;
         let file = self.remote_files.get_mut(&rid).unwrap();
-        file.data.resize(size, 0);
+        Arc::make_mut(&mut file.data).resize(size, 0);
         self.allocated_file_size += size - old_size;
         Ok(size)
     }
@@ -268,7 +291,7 @@ impl ResourceStore {
         }
         let bytes = decompress(compression, &payload[8..], expected, self.max_transfer_size)?;
         let file = self.remote_files.get_mut(&rid).unwrap();
-        file.data[start..end].copy_from_slice(&bytes);
+        Arc::make_mut(&mut file.data)[start..end].copy_from_slice(&bytes);
         if start < end {
             file.record_damage(start..end);
             Ok(vec![start..end])
@@ -352,7 +375,7 @@ impl ResourceStore {
             let data_start = offset + 8;
             let copy = &diff[data_start..data_start + copy_size];
             if file.data[byte_start..byte_end] != *copy {
-                file.data[byte_start..byte_end].copy_from_slice(copy);
+                Arc::make_mut(&mut file.data)[byte_start..byte_end].copy_from_slice(copy);
                 file.record_damage(byte_start..byte_end);
                 changed.push(byte_start..byte_end);
             }
@@ -362,7 +385,7 @@ impl ResourceStore {
         if trailing_size > 0 {
             let start = file_size - trailing_size;
             if file.data[start..] != *trailing {
-                file.data[start..].copy_from_slice(trailing);
+                Arc::make_mut(&mut file.data)[start..].copy_from_slice(trailing);
                 file.record_damage(start..file_size);
                 changed.push(start..file_size);
             }
@@ -509,6 +532,17 @@ impl ResourceStore {
         }
         let pipe_removed = self.pipes.remove(&rid).is_some();
         file_size.is_some() || pipe_removed
+    }
+
+    pub fn shared_data(&self, rid: Rid) -> Option<ShmData> {
+        self.remote_files
+            .get(&rid)
+            .map(|file| ShmData(file.data.clone()))
+            .or_else(|| {
+                self.local_files
+                    .get(&rid)
+                    .map(|file| ShmData(Arc::new(file.data.to_vec())))
+            })
     }
 
     pub fn data(&self, rid: Rid) -> Option<&[u8]> {

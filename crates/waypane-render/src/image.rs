@@ -38,19 +38,13 @@ impl Canvas {
         &self.rgba
     }
 
-    pub fn apply_frame(
-        &mut self,
-        frame: &Frame,
-        pool: Option<&[u8]>,
-    ) -> Result<Vec<UploadRegion>, ImageError> {
+    pub fn apply_frame(&mut self, frame: &Frame) -> Result<Vec<UploadRegion>, ImageError> {
         if let Some(order) = &frame.z_order {
             self.order.clone_from(order);
         }
         let Some(view) = frame.buffer.as_ref() else {
             return Ok(self.remove_layer(frame.surface_id));
         };
-        let pool =
-            pool.ok_or_else(|| ImageError::OutOfBounds(format!("missing pool {}", view.rid.0)))?;
         let size = output_size(view.width as u32, view.height as u32, view.transform);
         let offset = frame.parent.map(|(_, point)| point).unwrap_or_default();
         let is_root = frame.parent.is_none();
@@ -81,7 +75,7 @@ impl Canvas {
         } else {
             view.damage.clone()
         };
-        let decoded = decode_regions(pool, view, &source_damage)?;
+        let decoded = decode_regions(&view.data, view, &source_damage)?;
         let layer = self
             .layers
             .entry(frame.surface_id)
@@ -385,6 +379,7 @@ mod tests {
     fn view(width: i32, height: i32, transform: u32) -> BufferView {
         BufferView {
             rid: waypipe_client::Rid(1),
+            data: waypipe_client::ShmData::default(),
             offset: 0,
             width,
             height,
@@ -417,10 +412,9 @@ mod tests {
         let mut view = view(2, 2, 0);
         view.format = ShmFormat::Xrgb8888;
         let mut pool = vec![1, 2, 3, 0, 4, 5, 6, 0, 7, 8, 9, 0, 10, 11, 12, 0];
+        view.data = pool.clone().into();
         let mut canvas = Canvas::default();
-        let uploads = canvas
-            .apply_frame(&frame(1, view.clone(), None), Some(&pool))
-            .unwrap();
+        let uploads = canvas.apply_frame(&frame(1, view.clone(), None)).unwrap();
         assert_eq!(uploads.len(), 1);
         assert_eq!(
             uploads[0].rect,
@@ -434,15 +428,14 @@ mod tests {
         assert_eq!(&uploads[0].rgba[..8], &[3, 2, 1, 255, 6, 5, 4, 255]);
 
         pool[4..8].copy_from_slice(&[20, 21, 22, 0]);
+        view.data = pool.into();
         view.damage = vec![Rect {
             x: 1,
             y: 0,
             width: 1,
             height: 1,
         }];
-        let uploads = canvas
-            .apply_frame(&frame(1, view, None), Some(&pool))
-            .unwrap();
+        let uploads = canvas.apply_frame(&frame(1, view, None)).unwrap();
         assert_eq!(
             uploads[0].rect,
             Rect {
@@ -459,31 +452,24 @@ mod tests {
     fn blends_subsurface_over_root() {
         let mut root_view = view(1, 1, 0);
         root_view.format = ShmFormat::Xrgb8888;
-        let root = [0, 200, 0, 0];
+        root_view.data = [0, 200, 0, 0].to_vec().into();
         let mut canvas = Canvas::default();
-        canvas
-            .apply_frame(&frame(1, root_view, None), Some(&root))
-            .unwrap();
+        canvas.apply_frame(&frame(1, root_view, None)).unwrap();
 
-        let child_view = view(1, 1, 0);
-        let child = [0, 0, 255, 128];
+        let mut child_view = view(1, 1, 0);
+        child_view.data = [0, 0, 255, 128].to_vec().into();
         let uploads = canvas
-            .apply_frame(
-                &frame(2, child_view, Some((1, Point { x: 0, y: 0 }))),
-                Some(&child),
-            )
+            .apply_frame(&frame(2, child_view, Some((1, Point { x: 0, y: 0 }))))
             .unwrap();
         assert_eq!(uploads[0].rgba, vec![128, 99, 0, 255]);
     }
 
     #[test]
     fn applies_rotation_and_flips() {
-        let view = view(2, 1, 1);
-        let pool = [0, 0, 255, 255, 0, 255, 0, 255];
+        let mut view = view(2, 1, 1);
+        view.data = [0, 0, 255, 255, 0, 255, 0, 255].to_vec().into();
         let mut canvas = Canvas::default();
-        let uploads = canvas
-            .apply_frame(&frame(1, view, None), Some(&pool))
-            .unwrap();
+        let uploads = canvas.apply_frame(&frame(1, view, None)).unwrap();
         assert_eq!(
             canvas.size(),
             Size {
