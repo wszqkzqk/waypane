@@ -71,14 +71,31 @@ Wayland frame callbacks.
   `ExtendFile` updates use `Arc` copy-on-write, so retiring a quickly superseded buffer and
   closing its pool cannot leave a queued resize frame with a missing RID. Unique SHM
   allocations queued by one receive batch are bounded to 256 MiB; Android and desktop both
-  render from the frame-owned snapshot instead of looking up the RID later
+  render from the frame-owned snapshot instead of looking up the RID later. Canvas replaces a
+  layer's pixel allocation whenever its committed dimensions change, and empty commits without
+  attach, damage, callback, or z-order changes do not manufacture frames
+- Disjoint `wl_region` rectangle algebra (bounded to 1024 rectangles, transactional on error),
+  double-buffered `wl_surface.set_input_region` copy semantics, and half-open input hit testing for
+  toplevels, popups, and subsurfaces. Each surface tracks its outputs and emits `wl_surface.enter`
+  and `leave` on mapping, unmapping, late output binding, cursor replacement, and output release
 - Subsurface `place_above`/`place_below`, `set_sync`/`set_desync`, synchronized parent
-  caches, z-order composition, and popup/subsurface hit testing
-- Toplevel and popup native windows, maximize/fullscreen/minimize, interactive resize, and
-  drag requests; empty initial xdg-surface commits are allowed before `ack_configure`, while
-  real buffer attachments remain gated by the initial ack
-- Keyboard focus/keymap/modifiers, pointer enter/motion/buttons, `axis`/`axis_value120`, and
-  touch events
+  caches, published z-order deltas, and popup/subsurface hit testing. Rearranging a stack updates
+  the published order only when it changes
+- XDG positioner validation, all anchor and gravity values, Flip → Slide → Resize constraint
+  precedence, reactive parent configurations, and `xdg_popup.reposition` responses ordered as
+  `repositioned`, `xdg_popup.configure`, and `xdg_surface.configure`. Popup geometry becomes active
+  after its single-use `ack_configure`. `xdg_popup.grab` validates seat and recent input serial,
+  focuses the topmost popup, and emits `popup_done` on outside press or Escape
+- Toplevel min/max size constraints and reconfiguration, maximize/fullscreen/minimize, interactive
+  resize and drag requests. Empty initial xdg-surface commits are allowed before `ack_configure`,
+  while real buffer attachments remain gated by the initial ack; creating an xdg_surface after a
+  buffer attachment is rejected. Destroying a window dismisses descendant popups and cleans up
+  associated subsurfaces, touch contacts, pointer/keyboard focus, cursor mapping, and z-order state
+- Keyboard focus/keymap/modifiers, unmodified evdev key codes for `wl_keyboard.key`, duplicate
+  press/release suppression, focus-change key/modifier clearing, pointer enter/motion/buttons,
+  `axis`/`axis_value120`, and touch events. A host test enumerates every non-destructor request in
+  the generated official XML interfaces at the advertised versions and rejects missing or stale
+  routing policies
 - Android uses pointer-emulating touch by default: tap sends a left click, drag sends a left-button
   drag, and long-press sends a right click. A window-menu switch selects native Direct touch
   instead without delivering both protocols. Pointer presses set keyboard focus, and tracked
@@ -94,7 +111,8 @@ Wayland frame callbacks.
 - Frame backpressure: `wl_buffer.release` and `wl_callback.done` are sent after the associated
   native frame is submitted for presentation; occluded desktop windows retain backpressure
 - Bidirectional text clipboard synchronization over Waypipe pipes, bounded to 16 MiB, using
-  `arboard` on desktop and `ClipboardManager` on Android
+  `arboard` on desktop and `ClipboardManager` on Android; `wl_data_offer.accept` supports NULL
+  or an actually offered MIME type, and `receive` requires an exact offered text MIME type
 - `text-input-v3` commit-count serials, surrounding text, Unicode preedit and commit strings,
   plus Android soft-keyboard integration; ASCII key and delete fallback is used when the
   remote application does not support `text-input-v3`
@@ -120,7 +138,10 @@ Wayland frame callbacks.
   ordinary errors through wgpu error scopes. Resources drop in strict order: texture/blitter,
   wgpu surface, `ANativeWindow`, Java surface. `Outdated`/`Timeout` results retry while dirty,
   occluded results wait for visibility callbacks, and RenderThread JNI errors are shown in the
-  UI instead of crashing; `WaypaneRust` and `WaypaneRender` expose adapter/format and GPU errors
+  UI instead of crashing; `WaypaneRust` and `WaypaneRender` expose adapter/format and GPU errors.
+  Any remaining actor panic is caught, logged with a forced backtrace, and forwarded to the UI as
+  an error event; presentation completion distinguishes an already-closed actor from a full queue
+  so the secondary queue error cannot mask the root failure
 - Android always fits remote content without cropping, supports 1x–8x pinch zoom with panning,
   two-finger scrolling at fit, two-finger tap to toggle 2.5x focus, a Fit reset action, immersive
   fullscreen, and keep-screen-awake during sessions. Auto-resize is opt-in on every device size;
@@ -156,8 +177,9 @@ WAYPIPE_TEST_BINARY=/path/to/waypipe WAYPIPE_SSHD=/usr/sbin/sshd \
 ```
 
 These upstream tests check SHM pixel replication, damage, reverse keymap file descriptors,
-two-way clipboard transfers, Unicode preedit/commit serials, xdg-toplevel lifecycle, and
-keyboard/pointer delivery against the original Waypipe implementation. `upstream_ssh` also
+two-way clipboard transfers (including `wl_data_offer.accept`), Unicode preedit/commit serials,
+xdg-toplevel lifecycle, `wl_pointer.set_cursor(NULL)` after pointer enter, and exact evdev keycode
+delivery against the original Waypipe implementation. `upstream_ssh` also
 starts an isolated `sshd`, logs in with encrypted Ed25519 and RSA private keys while the
 server is restricted to `ssh-ed25519,rsa-sha2-512,rsa-sha2-256`, exercises interactive TOFU,
 discovers a Termux-style `TMPDIR`, and drives two real Wayland frames over SSH `streamlocal`
@@ -288,18 +310,20 @@ window is not counted as presented.
   automated run of the current code reached frame upload and `RedrawRequested`, but AppKit
   reported the 64x64 CLI-created window as `Occluded`, so that run did not claim a new on-screen
   presentation.
-- GitHub Actions run `44468575970` passed formatting/Clippy, all upstream Waypipe integration
-  tests, native Windows and macOS checks/tests/release builds, and a complete Android APK
-  build with JDK 25, Gradle 9.9.1, AGP 9.5.1, Kotlin 2.4.21, SDK 37.2, and NDK
-  30.0.16248370. All three build artifacts were uploaded.
-- That CI-produced Android APK, containing `lib/arm64-v8a/libwaypane_android.so`, was installed
-  on a physical Xiaomi Android 16 device with a Mali-G610 GPU. It negotiated RGBA8 with Vulkan,
-  connected to Termux Waypipe 0.11.3 over an imported encrypted RSA key, presented Weston frames,
-  and reconfigured surfaces across portrait, landscape, and immersive sizes without GPU validation
-  errors. Interactive testing of that APK found automatic soft-keyboard activation on every touch
-  and a resize-time `missing pool` race for quickly superseded SHM buffers. The subsequent SHM
-  snapshot and pointer-input fixes carry host regression tests; they require a new CI and device
-  run before their on-device behavior is considered verified.
+- GitHub Actions run `44475866518` passed formatting/Clippy, all upstream Waypipe integration
+  tests (including `wl_pointer.set_cursor`), native Windows and macOS checks/tests/release builds,
+  and a complete Android APK build with JDK 25, Gradle 9.9.1, AGP 9.5.1, Kotlin 2.4.21, SDK 37.2,
+  and NDK 30.0.16248370. All three build artifacts were uploaded.
+- CI-produced APKs containing `lib/arm64-v8a/libwaypane_android.so` were installed on a physical
+  Xiaomi Android 16 device with a Mali-G610 GPU. They negotiated RGBA8 with Vulkan, connected to
+  Termux Waypipe 0.11.3 over an imported encrypted RSA key, presented Weston frames, and
+  reconfigured surfaces across portrait, landscape, and immersive sizes without GPU validation
+  errors. Interactive testing exposed non-resizing layer allocations and missing
+  `wl_pointer.set_cursor`; those were fixed and covered by run `44475866518`. The subsequent
+  full-request audit fixes (`wl_data_offer.accept`, input regions, XDG popup/limits, output
+  membership, and exact evdev key payloads) pass the host workspace and Clippy. Their expanded
+  upstream fixtures and latest Android GPU build still require a new CI and device run before
+  claiming runtime verification for that revision.
 - The Windows desktop binary has not been launched on a physical Windows device, so its
   interactive GUI, input, clipboard, and lifecycle behavior remain runtime-unverified.
 
@@ -308,6 +332,19 @@ window is not counted as presented.
 - DMABUF/GPU passthrough and video codecs are not supported; remote applications use
   `wl_shm` (`--no-gpu`), with software rendering on the application host if necessary.
 - Clipboard support currently targets text MIME types, not arbitrary file or image formats.
+  Drag-and-drop (`wl_data_device.start_drag`, action negotiation, and `wl_data_offer.finish`) is
+  not implemented; accepting those requests is only a no-op and must not be confused with working
+  drag-and-drop.
+- `wl_surface.set_opaque_region` is accepted but currently ignored; it is only an optimization hint
+  and does not change input hit testing or visual correctness.
+- Android two-finger scrolling currently emits continuous `wl_pointer.axis` wheel events without
+  finger-axis origin, `axis_stop` inertia, or `axis_value120` steps. Native hardware-wheel events
+  do include `axis_value120` when supported.
+- Desktop keeps the native OS cursor instead of compositing remote `set_cursor` images; custom
+  cursor textures are currently composited only on Android.
+- Optional globals that Waypane does not advertise (for example fractional-scale, viewporter,
+  pointer constraints, tablet, Xwayland shell, and DMABUF protocols) fall back on the client's own
+  non-extension path and are not presented as implemented capabilities.
 - Desktop input uses physical/evdev key forwarding; native desktop IME/preedit integration is
   not implemented yet. Unicode soft-keyboard integration is implemented on Android.
 - SSH agent authentication, Xwayland session management, audio forwarding, and session
