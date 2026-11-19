@@ -11,7 +11,8 @@ daemon is not required.
 ## Architecture
 
 - `crates/waypipe-client`: portable Waypipe wire protocol, RID/fd mapping, shared memory,
-  pipes, outbound virtual files, and LZ4/Zstd compression, with allocation and size limits
+  pipes, outbound virtual files, LZ4/Zstd compression, and copy-on-write SHM snapshots for
+  queued frames, with allocation and size limits
 - `crates/waypane-core`: UI-independent Wayland compositor state machine generated from the
   official `wayland.xml`, `xdg-shell.xml`, and `text-input-v3.xml` definitions
 - `crates/waypane-transport`: `russh` authentication, SHA-256 host-key verification and TOFU,
@@ -66,6 +67,11 @@ Wayland frame callbacks.
 - Double-buffered surface state, ARGB/XRGB conversion, all eight buffer transforms, alpha
   composition, and damage-only uploads; `wl_shm_pool` keeps its logical size independent of
   a potentially larger backing fd, with non-shrinking bounded resizes as used by Waypipe C
+- Each `BufferView` owns a read-only `ShmData` snapshot when it is committed. Later diffs and
+  `ExtendFile` updates use `Arc` copy-on-write, so retiring a quickly superseded buffer and
+  closing its pool cannot leave a queued resize frame with a missing RID. Unique SHM
+  allocations queued by one receive batch are bounded to 256 MiB; Android and desktop both
+  render from the frame-owned snapshot instead of looking up the RID later
 - Subsurface `place_above`/`place_below`, `set_sync`/`set_desync`, synchronized parent
   caches, z-order composition, and popup/subsurface hit testing
 - Toplevel and popup native windows, maximize/fullscreen/minimize, interactive resize, and
@@ -73,6 +79,11 @@ Wayland frame callbacks.
   real buffer attachments remain gated by the initial ack
 - Keyboard focus/keymap/modifiers, pointer enter/motion/buttons, `axis`/`axis_value120`, and
   touch events
+- Android uses pointer-emulating touch by default: tap sends a left click, drag sends a left-button
+  drag, and long-press sends a right click. A window-menu switch selects native Direct touch
+  instead without delivering both protocols. Pointer presses set keyboard focus, and tracked
+  buttons are released even when the finger or mouse is lifted in a letterbox area. The soft
+  keyboard opens only from **Show keyboard**, never on every touch
 - Frame backpressure: `wl_buffer.release` and `wl_callback.done` are sent after the associated
   native frame is submitted for presentation; occluded desktop windows retain backpressure
 - Bidirectional text clipboard synchronization over Waypipe pipes, bounded to 16 MiB, using
@@ -217,13 +228,22 @@ own window geometry therefore stay intact, which is important for full desktops 
 The window is fitted entirely inside the available display area without changing its aspect ratio;
 black bars are presentation-only and never become remote input.
 
-- One finger delivers normal Wayland touch down, motion, and up events.
+- By default, one finger emulates a pointer at the touched position: a quick tap sends a left
+  click, moving beyond the touch slop starts a left-button drag at the original point, and a
+  stationary long-press sends a right click. This works with traditional Wayland applications
+  that do not listen for `wl_touch`.
+- Enable **Direct touch input** in the window menu to send native `wl_touch` down, motion, and
+  up events instead. Beginning a two-finger viewport gesture cancels the active touch or drag so
+  the remote application is not left with a stuck contact or button.
+- Ordinary touches never open the soft keyboard; use **Menu → Show keyboard** in portrait or
+  fullscreen mode. Hardware keyboard and pointer input remain available.
 - Add a second finger to pinch between 1x and 8x and drag to pan any enlarged axis. Beginning this
   gesture cancels an active remote touch instead of leaving a contact stuck down.
 - At 1x fit, where there is nothing to pan, a two-finger drag is forwarded as smooth scrolling.
 - A quick two-finger tap focuses at 2.5x around the fingers; another two-finger tap or **Fit**
   restores the complete window. Single-finger double-clicks remain ordinary remote clicks.
-- **Menu** provides Auto-resize, Fit, fullscreen, and closing the remote window. In fullscreen the
+- **Menu** provides Direct touch, Show keyboard, Auto-resize, Fit, fullscreen, and closing the
+  remote window. In fullscreen the
   system bars, app bar, and window tabs are hidden and a small translucent **Menu** remains at the
   top right; Back first leaves fullscreen and only leaves the session on a second press.
 - The screen stays awake while a session is open and the original screen-on/insets behavior is
@@ -261,16 +281,18 @@ window is not counted as presented.
   automated run of the current code reached frame upload and `RedrawRequested`, but AppKit
   reported the 64x64 CLI-created window as `Occluded`, so that run did not claim a new on-screen
   presentation.
-- GitHub Actions run `44456683377` passed formatting/Clippy, all upstream Waypipe integration
+- GitHub Actions run `44468575970` passed formatting/Clippy, all upstream Waypipe integration
   tests, native Windows and macOS checks/tests/release builds, and a complete Android APK
   build with JDK 25, Gradle 9.9.1, AGP 9.5.1, Kotlin 2.4.21, SDK 37.2, and NDK
   30.0.16248370. All three build artifacts were uploaded.
 - That CI-produced Android APK, containing `lib/arm64-v8a/libwaypane_android.so`, was installed
   on a physical Xiaomi Android 16 device with a Mali-G610 GPU. It negotiated RGBA8 with Vulkan,
-  connected to Termux Waypipe 0.11.3 over an imported encrypted RSA key, and presented Weston
-  frames. That build still used a Compose aspect-ratio modifier, which cropped a landscape desktop
-  on a portrait phone; it validates the underlying surface/GPU chain, not the newer GPU viewport
-  and gesture implementation.
+  connected to Termux Waypipe 0.11.3 over an imported encrypted RSA key, presented Weston frames,
+  and reconfigured surfaces across portrait, landscape, and immersive sizes without GPU validation
+  errors. Interactive testing of that APK found automatic soft-keyboard activation on every touch
+  and a resize-time `missing pool` race for quickly superseded SHM buffers. The subsequent SHM
+  snapshot and pointer-input fixes carry host regression tests; they require a new CI and device
+  run before their on-device behavior is considered verified.
 - The Windows desktop binary has not been launched on a physical Windows device, so its
   interactive GUI, input, clipboard, and lifecycle behavior remain runtime-unverified.
 
