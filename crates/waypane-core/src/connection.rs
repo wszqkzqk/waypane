@@ -84,8 +84,7 @@ impl Connection {
     }
 
     pub fn complete_frame(&mut self, frame_id: FrameId, time: u32) -> Result<Bytes> {
-        self.compositor
-            .complete_frame(&mut self.client, frame_id, time)?;
+        self.compositor.complete_frame(frame_id, time)?;
         self.flush()
     }
 

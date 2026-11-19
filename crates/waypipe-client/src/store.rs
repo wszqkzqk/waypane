@@ -528,24 +528,35 @@ impl ResourceStore {
         openings
     }
 
-    pub fn close_resource(&mut self, rid: Rid) -> bool {
+    pub fn close_pipe(&mut self, rid: Rid) -> bool {
+        self.fresh.remove(&rid);
+        let removed = self.pipes.remove(&rid).is_some();
+        if removed {
+            self.remember_closed(rid);
+        }
+        removed
+    }
+
+    pub fn close_transport_file(&mut self, rid: Rid) -> bool {
         self.fresh.remove(&rid);
         let file_size = self
             .remote_files
             .remove(&rid)
             .map(|file| file.data.len())
             .or_else(|| self.local_files.remove(&rid).map(|file| file.data.len()));
-        if let Some(size) = file_size {
-            self.allocated_file_size -= size;
+        let Some(size) = file_size else {
+            return false;
+        };
+        self.allocated_file_size -= size;
+        self.remember_closed(rid);
+        true
+    }
+
+    fn remember_closed(&mut self, rid: Rid) {
+        if self.recently_closed.len() == RECENTLY_CLOSED_LIMIT {
+            self.recently_closed.pop_front();
         }
-        let removed = file_size.is_some() || self.pipes.remove(&rid).is_some();
-        if removed {
-            if self.recently_closed.len() == RECENTLY_CLOSED_LIMIT {
-                self.recently_closed.pop_front();
-            }
-            self.recently_closed.push_back(rid);
-        }
-        removed
+        self.recently_closed.push_back(rid);
     }
 
     pub fn shared_data(&self, rid: Rid) -> Option<ShmData> {

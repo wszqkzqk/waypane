@@ -198,12 +198,7 @@ impl Compositor {
         })
     }
 
-    pub fn complete_frame(
-        &mut self,
-        client: &mut Client,
-        frame_id: FrameId,
-        time: u32,
-    ) -> Result<()> {
+    pub fn complete_frame(&mut self, frame_id: FrameId, time: u32) -> Result<()> {
         let frame = self
             .pending_frames
             .remove(&frame_id)
@@ -225,9 +220,9 @@ impl Compositor {
             }
         }
         if !self.surfaces.contains_key(&frame.surface_id) {
-            self.retire_orphan_buffers(client);
+            self.retire_orphan_buffers();
         }
-        self.retire_orphan_buffers(client);
+        self.retire_orphan_buffers();
         Ok(())
     }
 

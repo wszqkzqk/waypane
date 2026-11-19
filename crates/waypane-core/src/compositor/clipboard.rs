@@ -85,7 +85,7 @@ impl Compositor {
             let pending = self.clipboard_reads.get_mut(&rid).unwrap();
             if pending.data.len().saturating_add(chunk.len()) > MAX_CLIPBOARD_BYTES {
                 self.clipboard_reads.remove(&rid);
-                client.resources_mut().close_resource(rid);
+                client.resources_mut().close_pipe(rid);
                 return Err(Error::protocol("clipboard transfer exceeds 16 MiB limit"));
             }
             pending.data.extend_from_slice(&chunk);
@@ -106,7 +106,7 @@ impl Compositor {
         for forward in read.forwards {
             self.write_clipboard_to_pipe(client, forward, &read.data)?;
         }
-        client.resources_mut().close_resource(rid);
+        client.resources_mut().close_pipe(rid);
         let events = vec![CoreEvent::ClipboardData {
             mime_type: read.mime_type,
             data: read.data,
@@ -305,7 +305,7 @@ impl Compositor {
                     .collect::<Vec<_>>();
                 for rid in reads {
                     self.clipboard_reads.remove(&rid);
-                    client.resources_mut().close_resource(rid);
+                    client.resources_mut().close_pipe(rid);
                 }
                 true
             }
@@ -356,7 +356,7 @@ impl Compositor {
         }
         client.write_pipe(rid, data)?;
         client.close_pipe_write(rid)?;
-        client.resources_mut().close_resource(rid);
+        client.resources_mut().close_pipe(rid);
         Ok(())
     }
 

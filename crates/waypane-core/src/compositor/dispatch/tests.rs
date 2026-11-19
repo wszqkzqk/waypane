@@ -215,7 +215,7 @@ fn sync_subsurface_commits_with_parent_and_preserves_z_order() {
 
     fixture
         .compositor
-        .complete_frame(&mut fixture.client, child_frame.id, 10)
+        .complete_frame(child_frame.id, 10)
         .unwrap();
     assert_eq!(fixture.compositor.take_outgoing().len(), 3);
     assert!(fixture.compositor.subsurface_sync[&21].cached.is_empty());
@@ -497,7 +497,7 @@ fn queued_frame_keeps_its_shm_snapshot_after_diff_and_pool_close() {
         Some(&[255, 0, 0, 0][..])
     );
 
-    assert!(fixture.client.resources_mut().close_resource(Rid(1)));
+    assert!(fixture.client.resources_mut().close_transport_file(Rid(1)));
     assert_eq!(fixture.client.resources().data(Rid(1)), None);
     assert_eq!(&*snapshot, &[0, 255, 0, 0]);
 }
@@ -1723,4 +1723,39 @@ fn encodes_keyboard_keymap_and_input_events_with_full_arguments() {
     assert_eq!(key.len(), 4);
     assert_eq!(key[1], 102);
     assert_eq!(key[2..], [42, 1]);
+}
+
+#[test]
+fn retired_shm_pool_keeps_wire_mapping_for_late_diffs() {
+    let mut fixture = Fixture::new();
+    for id in [51, 52, 53] {
+        fixture.compositor.buffers.get_mut(&id).unwrap().alive = false;
+    }
+    fixture
+        .compositor
+        .finish_destructor(&mut fixture.client, 50, ObjectKind::ShmPool)
+        .unwrap();
+    assert!(fixture.compositor.pools[&50].destroyed);
+    fixture.compositor.retire_orphan_buffers();
+    assert!(!fixture.compositor.pools.contains_key(&50));
+    assert!(fixture.compositor.buffers.is_empty());
+    assert_eq!(
+        fixture.client.resources().data(Rid(1)),
+        Some(&[0, 255, 0, 0][..])
+    );
+
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&Rid(1).0.to_le_bytes());
+    payload.extend_from_slice(&12u32.to_le_bytes());
+    payload.extend_from_slice(&0u32.to_le_bytes());
+    payload.extend_from_slice(&0u32.to_le_bytes());
+    payload.extend_from_slice(&1u32.to_le_bytes());
+    payload.extend_from_slice(&[255, 0, 0, 0]);
+    let frame = waypipe_client::encode_frame(MessageType::BufferDiff, &payload).unwrap();
+    fixture.client.receive(&frame).unwrap();
+    assert_eq!(
+        fixture.client.resources().data(Rid(1)),
+        Some(&[255, 0, 0, 0][..])
+    );
+    assert_eq!(fixture.client.resources().allocated_file_size(), 4);
 }

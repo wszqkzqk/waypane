@@ -81,7 +81,7 @@ impl Compositor {
         );
     }
 
-    pub(super) fn retire_orphan_buffers(&mut self, client: &mut Client) {
+    pub(super) fn retire_orphan_buffers(&mut self) {
         let attached = self
             .surfaces
             .values()
@@ -95,7 +95,7 @@ impl Compositor {
             .collect::<Vec<_>>();
         for (id, pool_id) in retired {
             self.buffers.remove(&id);
-            self.unref_buffer(client, pool_id);
+            self.unref_buffer(pool_id);
         }
     }
 
@@ -952,7 +952,7 @@ impl Compositor {
                 );
             }
         }
-        self.retire_orphan_buffers(client);
+        self.retire_orphan_buffers();
         Ok(())
     }
 
@@ -1335,15 +1335,13 @@ impl Compositor {
             }
             ObjectKind::ShmPool => {
                 if self.pools[&id].buffer_refs == 0 {
-                    if let Some(pool) = self.pools.remove(&id) {
-                        client.resources_mut().close_resource(pool.rid);
-                    }
+                    self.pools.remove(&id);
                 } else {
                     self.pools.get_mut(&id).unwrap().destroyed = true;
                 }
             }
             ObjectKind::Buffer => {
-                self.retire_orphan_buffers(client);
+                self.retire_orphan_buffers();
             }
             ObjectKind::Region => {
                 self.regions.remove(&id);
@@ -1510,17 +1508,15 @@ impl Compositor {
         Ok(())
     }
 
-    fn unref_buffer(&mut self, client: &mut Client, pool_id: u32) {
-        let should_close = if let Some(pool) = self.pools.get_mut(&pool_id) {
+    fn unref_buffer(&mut self, pool_id: u32) {
+        let should_retire = if let Some(pool) = self.pools.get_mut(&pool_id) {
             pool.buffer_refs = pool.buffer_refs.saturating_sub(1);
             pool.destroyed && pool.buffer_refs == 0
         } else {
             false
         };
-        if should_close {
-            if let Some(pool) = self.pools.remove(&pool_id) {
-                client.resources_mut().close_resource(pool.rid);
-            }
+        if should_retire {
+            self.pools.remove(&pool_id);
         }
     }
 }

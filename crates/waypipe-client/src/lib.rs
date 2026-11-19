@@ -420,12 +420,29 @@ mod tests {
     }
 
     #[test]
+    fn closes_pipes_without_removing_shm_files() {
+        let mut store = ResourceStore::new(
+            DEFAULT_MAX_SHM_FILE_SIZE,
+            DEFAULT_MAX_SHM_TRANSFER_SIZE,
+            DEFAULT_MAX_TOTAL_SHM_SIZE,
+        );
+        let file = Rid(900);
+        let pipe = Rid(901);
+        store.open_file(file, 4).unwrap();
+        store.open_remote_pipe(pipe, PipeOpenKind::RW).unwrap();
+        assert!(store.close_pipe(pipe));
+        assert!(!store.close_pipe(pipe));
+        assert_eq!(store.data(file), Some(&[0, 0, 0, 0][..]));
+        assert_eq!(store.read_pipe(pipe, 1), Err(Error::UnknownRid(pipe)));
+    }
+
+    #[test]
     fn reports_unknown_rid_frame_context_within_bounded_history() {
         let mut client = negotiated_client();
         for index in 10..80 {
             let rid = Rid(index);
             client.resources_mut().open_file(rid, 0).unwrap();
-            assert!(client.resources_mut().close_resource(rid));
+            assert!(client.resources_mut().close_transport_file(rid));
         }
         let diff = |rid: Rid| {
             let mut payload = rid.0.to_le_bytes().to_vec();
