@@ -405,9 +405,13 @@ private fun SessionScreen(model: WaypaneViewModel, state: UiState) {
                     key(selected) {
                         AndroidView(
                             factory = { context ->
-                                RemoteSurfaceView(context, selected, model::nativeHandle) { text ->
-                                    model.reportUnsupportedText(text)
-                                }
+                                RemoteSurfaceView(
+                                    context = context,
+                                    key = selected,
+                                    nativeHandle = model::nativeHandle,
+                                    onUnsupportedText = { text -> model.reportUnsupportedText(text) },
+                                    onError = model::reportError,
+                                )
                             },
                             modifier = if (ratio != null) {
                                 Modifier.fillMaxSize().aspectRatio(ratio, matchHeightConstraintsFirst = true)

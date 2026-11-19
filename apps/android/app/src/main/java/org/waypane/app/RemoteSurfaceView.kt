@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Process
+import android.util.Log
 import android.view.Choreographer
 import android.view.InputDevice
 import android.view.KeyEvent
@@ -22,6 +23,7 @@ class RemoteSurfaceView(
     private val key: SurfaceKey,
     private val nativeHandle: () -> Long,
     private val onUnsupportedText: (String) -> Unit = {},
+    private val onError: (String) -> Unit = {},
 ) : SurfaceView(context), SurfaceHolder.Callback, Choreographer.FrameCallback {
 
     @Volatile
@@ -39,23 +41,34 @@ class RemoteSurfaceView(
 
     private fun handle() = nativeHandle()
 
+    private fun reportRenderError(action: String, error: Throwable) {
+        attached = false
+        waitingForFrame = false
+        val message = "$action: ${error.message ?: error.toString()}"
+        Log.w(TAG, message, error)
+        post { onError(message) }
+    }
+
     override fun surfaceCreated(holder: SurfaceHolder) {
         seenVersion = 0L
         renderHandler.post {
             val handle = handle()
             if (handle == 0L) return@post
-            attached = NativeBridge.nativeAttachSurface(
-                handle,
-                key.session,
-                key.window,
-                holder.surface,
-                width.coerceAtLeast(1),
-                height.coerceAtLeast(1),
-            )
-            if (attached) {
+            runCatching {
+                attached = NativeBridge.nativeAttachSurface(
+                    handle,
+                    key.session,
+                    key.window,
+                    holder.surface,
+                    width.coerceAtLeast(1),
+                    height.coerceAtLeast(1),
+                )
+                if (!attached) error("nativeAttachSurface returned false")
                 NativeBridge.nativeResizeSurface(handle, key.session, key.window, width, height)
-                scheduleDirtyWait()
+            }.onFailure { error ->
+                reportRenderError("Failed to initialize Android GPU surface", error)
             }
+            if (attached) scheduleDirtyWait()
         }
     }
 
@@ -63,38 +76,56 @@ class RemoteSurfaceView(
         renderHandler.post {
             val handle = handle()
             if (attached && handle != 0L) {
-                NativeBridge.nativeResizeSurface(handle, key.session, key.window, width, height)
+                runCatching {
+                    NativeBridge.nativeResizeSurface(handle, key.session, key.window, width, height)
+                }.onFailure { error ->
+                    reportRenderError("Failed to resize Android GPU surface", error)
+                }
+            }
+        }
+    }
+
+    private fun wakeNativeSurface(handle: Long) {
+        if (handle == 0L) return
+        runCatching {
+            NativeBridge.nativeWakeSurface(handle, key.session, key.window)
+        }.onFailure { error ->
+            Log.d(TAG, "Surface wakeup skipped after native handle closed", error)
+        }
+    }
+
+    private fun detachNativeSurface(handle: Long) {
+        if (handle == 0L) return
+        runCatching {
+            NativeBridge.nativeDetachSurface(handle, key.session, key.window)
+        }.onFailure { error ->
+            if (handle() != 0L) {
+                reportRenderError("Failed to release Android GPU surface", error)
+            } else {
+                Log.d(TAG, "Surface detach skipped after native handle closed", error)
             }
         }
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         attached = false
+        wakeNativeSurface(handle())
         val handle = handle()
-        if (handle != 0L) {
-            NativeBridge.nativeWakeSurface(handle, key.session, key.window)
-        }
         renderHandler.post {
             waitingForFrame = false
-            if (handle != 0L) {
-                NativeBridge.nativeDetachSurface(handle, key.session, key.window)
-            }
+            detachNativeSurface(handle)
             seenVersion = 0L
         }
     }
 
     override fun onDetachedFromWindow() {
         val handle = handle()
-        if (attached && handle != 0L) {
-            NativeBridge.nativeWakeSurface(handle, key.session, key.window)
-        }
+        if (attached) wakeNativeSurface(handle)
         attached = false
         holder.removeCallback(this)
         renderHandler.post {
             waitingForFrame = false
-            if (handle != 0L) {
-                NativeBridge.nativeDetachSurface(handle, key.session, key.window)
-            }
+            detachNativeSurface(handle)
         }
         super.onDetachedFromWindow()
     }
@@ -108,13 +139,17 @@ class RemoteSurfaceView(
                 return@post
             }
             val handle = handle()
-            val version = NativeBridge.nativeWaitDirty(
-                handle,
-                key.session,
-                key.window,
-                seenVersion,
-                DIRTY_WAIT_MS,
-            )
+            val version = runCatching {
+                NativeBridge.nativeWaitDirty(
+                    handle,
+                    key.session,
+                    key.window,
+                    seenVersion,
+                    DIRTY_WAIT_MS,
+                )
+            }.onFailure { error ->
+                reportRenderError("Failed to wait for Wayland frames", error)
+            }.getOrNull() ?: return@post
             waitingForFrame = false
             if (version > 0L && attached && handle == handle()) {
                 seenVersion = version
@@ -129,7 +164,12 @@ class RemoteSurfaceView(
         if (!attached) return
         val handle = handle()
         if (handle == 0L) return
-        NativeBridge.nativeRender(handle, key.session, key.window)
+        runCatching {
+            NativeBridge.nativeRender(handle, key.session, key.window)
+        }.onFailure { error ->
+            reportRenderError("Failed to render Android GPU surface", error)
+            return
+        }
         scheduleDirtyWait()
     }
 
@@ -341,6 +381,7 @@ class RemoteSurfaceView(
     }
 
     companion object {
+        private const val TAG = "WaypaneRender"
         private const val TOUCH_DOWN = 0
         private const val TOUCH_MOTION = 1
         private const val TOUCH_UP = 2

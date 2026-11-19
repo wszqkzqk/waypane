@@ -352,7 +352,7 @@ class WaypaneViewModel(application: Application) : AndroidViewModel(application)
         reportError(text)
     }
 
-    private fun reportError(message: String) {
+    fun reportError(message: String) {
         Log.w(LOG_TAG, message)
         uiState = uiState.copy(error = message, status = message, connecting = false)
         appendLog(message)
