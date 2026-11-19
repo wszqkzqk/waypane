@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
+use std::sync::Arc;
 
 use jni::objects::JObject;
 use jni::refs::Global;
@@ -49,23 +51,86 @@ impl Drop for NativeWindowRef {
     }
 }
 
+const PREFERRED_SURFACE_FORMATS: &[wgpu::TextureFormat] = &[
+    wgpu::TextureFormat::Rgba8UnormSrgb,
+    wgpu::TextureFormat::Bgra8UnormSrgb,
+    wgpu::TextureFormat::Rgba8Unorm,
+    wgpu::TextureFormat::Bgra8Unorm,
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SurfacePlan {
+    format: wgpu::TextureFormat,
+    alpha_mode: wgpu::CompositeAlphaMode,
+    present_mode: wgpu::PresentMode,
+    color_space: wgpu::SurfaceColorSpace,
+}
+
+impl SurfacePlan {
+    fn negotiate(capabilities: &wgpu::SurfaceCapabilities) -> Result<Self, String> {
+        let format = PREFERRED_SURFACE_FORMATS
+            .iter()
+            .copied()
+            .find(|format| capabilities.formats.contains(format))
+            .ok_or_else(|| {
+                format!(
+                    "Android surface offers no Rgba8/Bgra8 formats; advertised formats: {:?}",
+                    capabilities.formats
+                )
+            })?;
+        if !capabilities
+            .usages
+            .contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
+        {
+            return Err(format!(
+                "Android surface usage {:?} does not include RENDER_ATTACHMENT",
+                capabilities.usages
+            ));
+        }
+        if capabilities.alpha_modes.is_empty() {
+            return Err("Android surface reports no supported alpha modes".to_string());
+        }
+        if capabilities.present_modes.is_empty() {
+            return Err("Android surface reports no supported present modes".to_string());
+        }
+        Ok(Self {
+            format,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            present_mode: wgpu::PresentMode::AutoVsync,
+            color_space: wgpu::SurfaceColorSpace::Auto,
+        })
+    }
+
+    fn configuration(self, width: u32, height: u32) -> wgpu::SurfaceConfiguration {
+        wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: self.format,
+            width: width.max(1),
+            height: height.max(1),
+            present_mode: self.present_mode,
+            desired_maximum_frame_latency: 2,
+            alpha_mode: self.alpha_mode,
+            view_formats: Vec::new(),
+            color_space: self.color_space,
+        }
+    }
+}
+
 struct NativeSurface {
-    _java_surface: Global<JObject<'static>>,
-    _window: NativeWindowRef,
-    surface: Option<wgpu::Surface<'static>>,
-    config: wgpu::SurfaceConfiguration,
-    blitter: wgpu::util::TextureBlitter,
     texture: Option<wgpu::Texture>,
     texture_size: Size,
+    blitter: Option<wgpu::util::TextureBlitter>,
+    config: Option<wgpu::SurfaceConfiguration>,
+    surface: ManuallyDrop<wgpu::Surface<'static>>,
+    _window: NativeWindowRef,
+    _java_surface: Global<JObject<'static>>,
 }
 
 impl NativeSurface {
-    fn create(
+    fn new(
         env: &mut Env<'_>,
         java_surface: &JObject<'_>,
         instance: &wgpu::Instance,
-        device: &wgpu::Device,
-        format: wgpu::TextureFormat,
     ) -> Result<Self, String> {
         let window = unsafe { ANativeWindow_fromSurface(env.get_raw(), java_surface.as_raw()) };
         let window = NativeWindowRef(
@@ -81,52 +146,73 @@ impl NativeSurface {
         let java_surface = env
             .new_global_ref(java_surface)
             .map_err(|error| format!("failed to retain Java Surface: {error}"))?;
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            color_space: wgpu::SurfaceColorSpace::Auto,
-            width: 1,
-            height: 1,
-            present_mode: wgpu::PresentMode::AutoVsync,
-            desired_maximum_frame_latency: 2,
-            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
-            view_formats: Vec::new(),
-        };
-        surface.configure(device, &config);
         Ok(Self {
-            _java_surface: java_surface,
-            _window: window,
-            surface: Some(surface),
-            blitter: wgpu::util::TextureBlitter::new(device, format),
-            config,
             texture: None,
             texture_size: Size::default(),
+            blitter: None,
+            config: None,
+            surface: ManuallyDrop::new(surface),
+            _window: window,
+            _java_surface: java_surface,
         })
     }
 
-    fn resize(&mut self, width: u32, height: u32, device: &wgpu::Device) {
-        if width == 0 || height == 0 {
-            return;
+    fn configure(
+        &mut self,
+        device: &wgpu::Device,
+        adapter: &wgpu::Adapter,
+        width: u32,
+        height: u32,
+    ) -> Result<(), String> {
+        let capabilities = self.surface.get_capabilities(adapter);
+        let plan = SurfacePlan::negotiate(&capabilities)?;
+        let config = plan.configuration(width, height);
+        if self.config.as_ref() == Some(&config) && self.blitter.is_some() {
+            return Ok(());
         }
-        self.config.width = width;
-        self.config.height = height;
-        if let Some(surface) = &self.surface {
-            surface.configure(device, &self.config);
+
+        log::info!(
+            "Configuring Android surface {}x{} with format {:?}; advertised formats: {:?}, alpha modes: {:?}, present modes: {:?}",
+            config.width,
+            config.height,
+            config.format,
+            capabilities.formats,
+            capabilities.alpha_modes,
+            capabilities.present_modes
+        );
+        let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        self.surface.configure(device, &config);
+        let blitter = wgpu::util::TextureBlitter::new(device, config.format);
+        if let Some(error) = pollster::block_on(error_scope.pop()) {
+            let _ = blitter;
+            return Err(format!(
+                "Surface::configure failed for format {:?}, alpha {:?}, present mode {:?}, size {}x{}: {error}",
+                config.format,
+                config.alpha_mode,
+                config.present_mode,
+                config.width,
+                config.height
+            ));
         }
+
+        self.config = Some(config);
+        self.blitter = Some(blitter);
+        Ok(())
     }
 
-    fn render(
+    fn present(
         &mut self,
         state: &mut AndroidSurface,
         device: &wgpu::Device,
+        adapter: &wgpu::Adapter,
         queue: &wgpu::Queue,
-    ) -> Option<u64> {
+    ) -> Result<RenderOutcome, String> {
         if !state.signal.is_dirty() {
-            return None;
+            return Ok(RenderOutcome::Idle);
         }
         let size = state.canvas.size();
         if size.width == 0 || size.height == 0 {
-            return None;
+            return Ok(RenderOutcome::Idle);
         }
         if self.texture_size != size {
             self.texture = Some(device.create_texture(&wgpu::TextureDescriptor {
@@ -145,7 +231,10 @@ impl NativeSurface {
             }));
             self.texture_size = size;
         }
-        let texture = self.texture.as_ref()?;
+        let texture = self
+            .texture
+            .as_ref()
+            .ok_or_else(|| "Android canvas texture was not allocated".to_string())?;
         queue.write_texture(
             texture.as_image_copy(),
             state.canvas.rgba(),
@@ -161,56 +250,73 @@ impl NativeSurface {
             },
         );
 
-        let surface = self.surface.as_ref()?;
-        let frame = match surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
-            wgpu::CurrentSurfaceTexture::Outdated => {
-                surface.configure(device, &self.config);
-                return None;
+        let (width, height) = self
+            .config
+            .as_ref()
+            .map(|config| (config.width, config.height))
+            .ok_or_else(|| "Android surface has not been configured".to_string())?;
+        let frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
+                log::debug!(
+                    "Android surface texture is suboptimal; presenting once before reconfiguration"
+                );
+                frame
             }
-            _ => return None,
+            wgpu::CurrentSurfaceTexture::Outdated => {
+                self.configure(device, adapter, width, height)?;
+                return Ok(RenderOutcome::Retry);
+            }
+            wgpu::CurrentSurfaceTexture::Timeout => return Ok(RenderOutcome::Retry),
+            wgpu::CurrentSurfaceTexture::Occluded => return Ok(RenderOutcome::Occluded),
+            wgpu::CurrentSurfaceTexture::Lost => {
+                return Err("Android GPU surface was lost".to_string());
+            }
+            wgpu::CurrentSurfaceTexture::Validation => {
+                return Err("Surface::get_current_texture failed validation".to_string());
+            }
         };
+        let blitter = self
+            .blitter
+            .as_ref()
+            .ok_or_else(|| "Android surface blitter was not initialized".to_string())?;
         let source = texture.create_view(&Default::default());
         let target = frame.texture.create_view(&Default::default());
         let mut encoder = device.create_command_encoder(&Default::default());
-        self.blitter.copy(device, &mut encoder, &source, &target);
+        blitter.copy(device, &mut encoder, &source, &target);
         queue.submit([encoder.finish()]);
         queue.present(frame);
         let version = state.version;
         state.signal.mark_clean();
-        Some(version)
+        Ok(RenderOutcome::Presented(version))
     }
 }
 
 impl Drop for NativeSurface {
     fn drop(&mut self) {
-        let _ = self.surface.take();
+        self.texture.take();
+        self.blitter.take();
+        self.config.take();
+        // SAFETY: `surface` was initialized in `new` and is dropped exactly once here, before
+        // NativeWindowRef releases ANativeWindow and the global Java Surface reference is dropped.
+        unsafe { ManuallyDrop::drop(&mut self.surface) };
     }
 }
 
-const PREFERRED_SURFACE_FORMATS: &[wgpu::TextureFormat] = &[
-    wgpu::TextureFormat::Rgba8UnormSrgb,
-    wgpu::TextureFormat::Bgra8UnormSrgb,
-    wgpu::TextureFormat::Rgba8Unorm,
-    wgpu::TextureFormat::Bgra8Unorm,
-];
-
-fn select_surface_format(capabilities: &wgpu::SurfaceCapabilities) -> Option<wgpu::TextureFormat> {
-    PREFERRED_SURFACE_FORMATS.iter().copied().find(|format| {
-        capabilities.formats.contains(format)
-            && capabilities
-                .usages
-                .contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
-    })
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderOutcome {
+    Idle,
+    Retry,
+    Occluded,
+    Presented(u64),
 }
 
 #[derive(Default)]
 pub struct GpuRenderer {
     instance: Option<wgpu::Instance>,
+    adapter: Option<wgpu::Adapter>,
     device: Option<wgpu::Device>,
     queue: Option<wgpu::Queue>,
-    format: Option<wgpu::TextureFormat>,
     surfaces: HashMap<SurfaceKey, NativeSurface>,
 }
 
@@ -224,99 +330,123 @@ impl GpuRenderer {
         height: u32,
     ) -> Result<(), String> {
         if self.surfaces.contains_key(&key) {
-            return Ok(());
+            return self.resize(key, width, height);
         }
-        if self.device.is_none() {
-            self.initialize(env, java_surface)?;
+        if self.instance.is_none() {
+            self.instance = Some(wgpu::Instance::new(
+                wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+            ));
         }
-        let mut surface = NativeSurface::create(
+        let mut surface = NativeSurface::new(
             env,
             java_surface,
-            self.instance.as_ref().unwrap(),
-            self.device.as_ref().unwrap(),
-            self.format.unwrap(),
+            self.instance
+                .as_ref()
+                .ok_or_else(|| "Android GPU instance was not created".to_string())?,
         )?;
-        if width > 0 && height > 0 {
-            surface.resize(width, height, self.device.as_ref().unwrap());
+        if self.adapter.is_none() {
+            self.initialize(&surface.surface)?;
         }
+        let adapter = self
+            .adapter
+            .as_ref()
+            .ok_or_else(|| "Android GPU adapter was not initialized".to_string())?;
+        let device = self
+            .device
+            .as_ref()
+            .ok_or_else(|| "Android GPU device was not initialized".to_string())?;
+        surface.configure(device, adapter, width, height)?;
         self.surfaces.insert(key, surface);
         Ok(())
     }
 
-    pub fn resize(&mut self, key: SurfaceKey, width: u32, height: u32) {
-        if let (Some(surface), Some(device)) = (self.surfaces.get_mut(&key), self.device.as_ref()) {
-            surface.resize(width, height, device);
-        }
+    pub fn resize(&mut self, key: SurfaceKey, width: u32, height: u32) -> Result<(), String> {
+        let Some(surface) = self.surfaces.get_mut(&key) else {
+            return Ok(());
+        };
+        let adapter = self.adapter.as_ref().ok_or_else(|| {
+            "cannot resize before the Android GPU adapter is initialized".to_string()
+        })?;
+        let device = self.device.as_ref().ok_or_else(|| {
+            "cannot resize before the Android GPU device is initialized".to_string()
+        })?;
+        surface.configure(device, adapter, width, height)
     }
 
-    pub fn render(&mut self, actor: &ActorHandle, key: SurfaceKey) -> bool {
-        let (Some(state), Some(surface), Some(device), Some(queue)) = (
-            actor.surface(key),
-            self.surfaces.get_mut(&key),
+    pub fn render(
+        &mut self,
+        actor: &ActorHandle,
+        key: SurfaceKey,
+    ) -> Result<RenderOutcome, String> {
+        let (Some(adapter), Some(device), Some(queue)) = (
+            self.adapter.as_ref(),
             self.device.as_ref(),
             self.queue.as_ref(),
         ) else {
-            return false;
+            return Ok(RenderOutcome::Idle);
+        };
+        let Some(surface) = self.surfaces.get_mut(&key) else {
+            return Ok(RenderOutcome::Idle);
+        };
+        let Some(state) = actor.surface(key) else {
+            return Ok(RenderOutcome::Idle);
         };
         let mut state = state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(version) = surface.render(&mut state, device, queue) else {
-            return false;
-        };
+        let outcome = surface.present(&mut state, device, adapter, queue)?;
         drop(state);
-        actor.send(crate::ActorCommand::Presented(key, version))
+        if let RenderOutcome::Presented(version) = outcome {
+            if !actor.send(crate::ActorCommand::Presented(key, version)) {
+                return Err(format!(
+                    "failed to queue presentation completion for session {} window {}",
+                    key.session, key.window
+                ));
+            }
+        }
+        Ok(outcome)
     }
 
     pub fn detach(&mut self, key: SurfaceKey) {
         self.surfaces.remove(&key);
         if self.surfaces.is_empty() {
-            self.device = None;
-            self.queue = None;
-            self.format = None;
-            self.instance = None;
+            self.queue.take();
+            self.device.take();
+            self.adapter.take();
+            self.instance.take();
         }
     }
 
-    fn initialize(&mut self, env: &mut Env<'_>, java_surface: &JObject<'_>) -> Result<(), String> {
-        let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-        let window = unsafe { ANativeWindow_fromSurface(env.get_raw(), java_surface.as_raw()) };
-        let window = NativeWindowRef(
-            NonNull::new(window)
-                .ok_or_else(|| "ANativeWindow_fromSurface returned null".to_string())?,
-        );
-        let target = wgpu::SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle: Some(AndroidDisplayHandle::new().into()),
-            raw_window_handle: AndroidNdkWindowHandle::new(window.0).into(),
-        };
-        let surface = unsafe { instance.create_surface_unsafe(target) }
-            .map_err(|error| format!("failed to create Android GPU surface: {error}"))?;
+    fn initialize(&mut self, surface: &wgpu::Surface<'_>) -> Result<(), String> {
+        let instance = self
+            .instance
+            .as_ref()
+            .ok_or_else(|| "Android GPU instance was not created".to_string())?;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            compatible_surface: Some(&surface),
+            compatible_surface: Some(surface),
             ..Default::default()
         }))
         .map_err(|error| format!("no compatible Android GPU adapter: {error}"))?;
+        let adapter_info = adapter.get_info();
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
-                .map_err(|error| format!("failed to create Android GPU device: {error}"))?;
-        let adapter_info = adapter.get_info();
-        let capabilities = surface.get_capabilities(&adapter);
-        let format = select_surface_format(&capabilities).ok_or_else(|| {
-            format!(
-                "Android GPU {} offers no Rgba8/Bgra8 render-attachment surface formats; advertised formats: {:?}",
-                adapter_info.name, capabilities.formats
-            )
-        })?;
-        log::info!(
-            "Android GPU adapter: {}; selected surface format {format:?}; advertised formats: {:?}",
-            adapter_info.name,
-            capabilities.formats
-        );
-        self.instance = Some(instance);
+                .map_err(|error| {
+                    format!(
+                        "failed to create Android GPU device on {}: {error}",
+                        adapter_info.name
+                    )
+                })?;
+        device.on_uncaptured_error(Arc::new(|error| {
+            log::error!("Uncaptured Android GPU error: {error}");
+        }));
+        self.adapter = Some(adapter);
         self.device = Some(device);
         self.queue = Some(queue);
-        self.format = Some(format);
+        log::info!(
+            "Android GPU adapter: {} ({:?})",
+            adapter_info.name,
+            adapter_info.backend
+        );
         Ok(())
     }
 }
@@ -325,27 +455,68 @@ impl GpuRenderer {
 mod tests {
     use super::*;
 
-    #[test]
-    fn skips_compressed_android_surface_formats() {
-        let compressed = wgpu::TextureFormat::Astc {
-            block: wgpu::AstcBlock::B4x4,
-            channel: wgpu::AstcChannel::Unorm,
-        };
-        let mut capabilities = wgpu::SurfaceCapabilities {
-            formats: vec![
-                compressed,
-                wgpu::TextureFormat::Bgra8Unorm,
-                wgpu::TextureFormat::Rgba8UnormSrgb,
-            ],
+    fn test_capabilities(formats: Vec<wgpu::TextureFormat>) -> wgpu::SurfaceCapabilities {
+        wgpu::SurfaceCapabilities {
+            formats,
+            present_modes: vec![wgpu::PresentMode::Fifo],
+            alpha_modes: vec![wgpu::CompositeAlphaMode::Inherit],
             usages: wgpu::TextureUsages::RENDER_ATTACHMENT,
             ..Default::default()
-        };
-        assert_eq!(
-            select_surface_format(&capabilities),
-            Some(wgpu::TextureFormat::Rgba8UnormSrgb)
-        );
+        }
+    }
 
-        capabilities.formats = vec![compressed];
-        assert_eq!(select_surface_format(&capabilities), None);
+    fn compressed() -> wgpu::TextureFormat {
+        wgpu::TextureFormat::Astc {
+            block: wgpu::AstcBlock::B4x4,
+            channel: wgpu::AstcChannel::Unorm,
+        }
+    }
+
+    #[test]
+    fn negotiates_uncompressed_formats_and_capability_safe_modes() {
+        let capabilities = test_capabilities(vec![
+            compressed(),
+            wgpu::TextureFormat::Bgra8Unorm,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        ]);
+        let plan = SurfacePlan::negotiate(&capabilities).unwrap();
+        assert_eq!(plan.format, wgpu::TextureFormat::Rgba8UnormSrgb);
+        assert_eq!(plan.alpha_mode, wgpu::CompositeAlphaMode::Auto);
+        assert_eq!(plan.present_mode, wgpu::PresentMode::AutoVsync);
+        assert_eq!(plan.color_space, wgpu::SurfaceColorSpace::Auto);
+
+        let config = plan.configuration(0, 0);
+        assert_eq!((config.width, config.height), (1, 1));
+        assert_eq!(config.usage, wgpu::TextureUsages::RENDER_ATTACHMENT);
+        assert_eq!(config.alpha_mode, wgpu::CompositeAlphaMode::Auto);
+        assert_eq!(config.present_mode, wgpu::PresentMode::AutoVsync);
+        assert_eq!(config.color_space, wgpu::SurfaceColorSpace::Auto);
+        assert!(config.view_formats.is_empty());
+    }
+
+    #[test]
+    fn rejects_missing_usage_alpha_present_or_renderable_formats() {
+        let mut capabilities = test_capabilities(vec![compressed()]);
+        assert!(SurfacePlan::negotiate(&capabilities)
+            .unwrap_err()
+            .contains("no Rgba8/Bgra8 formats"));
+
+        capabilities.formats = vec![wgpu::TextureFormat::Rgba8Unorm];
+        capabilities.usages = wgpu::TextureUsages::TEXTURE_BINDING;
+        assert!(SurfacePlan::negotiate(&capabilities)
+            .unwrap_err()
+            .contains("RENDER_ATTACHMENT"));
+
+        let mut capabilities = test_capabilities(vec![wgpu::TextureFormat::Rgba8Unorm]);
+        capabilities.alpha_modes.clear();
+        assert!(SurfacePlan::negotiate(&capabilities)
+            .unwrap_err()
+            .contains("no supported alpha modes"));
+
+        let mut capabilities = test_capabilities(vec![wgpu::TextureFormat::Rgba8Unorm]);
+        capabilities.present_modes.clear();
+        assert!(SurfacePlan::negotiate(&capabilities)
+            .unwrap_err()
+            .contains("no supported present modes"));
     }
 }

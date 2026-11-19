@@ -8,7 +8,7 @@ use std::sync::Once;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use gpu::GpuRenderer;
+use gpu::{GpuRenderer, RenderOutcome};
 use jni::objects::{JClass, JObject, JString};
 use jni::sys::{jboolean, jfloat, jint, jlong, jobject};
 use jni::{Env, EnvUnowned};
@@ -73,6 +73,11 @@ struct NativeEntry {
 
 static STATE: Mutex<Option<NativeEntry>> = Mutex::new(None);
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
+
+const RENDER_IDLE: jint = 0;
+const RENDER_PRESENTED: jint = 1;
+const RENDER_RETRY: jint = 2;
+const RENDER_OCCLUDED: jint = 3;
 
 #[derive(Debug)]
 struct JniError(String);
@@ -295,7 +300,7 @@ pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeResizeSurface(
         let width = u32::try_from(width).map_err(|_| "invalid width".to_string())?;
         let height = u32::try_from(height).map_err(|_| "invalid height".to_string())?;
         let state = state(handle)?;
-        lock(&state.gpu).resize(key, width, height);
+        lock(&state.gpu).resize(key, width, height)?;
         Ok(())
     })
 }
@@ -307,12 +312,17 @@ pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeRender(
     handle: jlong,
     session: jlong,
     window: jint,
-) -> jboolean {
-    jni_guard!(env, env, jboolean, {
+) -> jint {
+    jni_guard!(env, env, jint, {
         let key = key(session, window)?;
         let state = state(handle)?;
-        let rendered = lock(&state.gpu).render(&state.actor, key);
-        Ok(jb(rendered))
+        let outcome = lock(&state.gpu).render(&state.actor, key)?;
+        Ok(match outcome {
+            RenderOutcome::Idle => RENDER_IDLE,
+            RenderOutcome::Presented(_) => RENDER_PRESENTED,
+            RenderOutcome::Retry => RENDER_RETRY,
+            RenderOutcome::Occluded => RENDER_OCCLUDED,
+        })
     })
 }
 
