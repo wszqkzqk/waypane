@@ -24,7 +24,9 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBars
@@ -69,15 +71,20 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -85,6 +92,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 
 private enum class AuthenticationMode(val label: String) {
@@ -648,6 +656,8 @@ private fun SessionScreen(
 ) {
     val context = LocalContext.current
     val configuration = LocalConfiguration.current
+    val density = LocalDensity.current
+    val rootView = LocalView.current
     val landscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     val selected = state.selected
     val selectedWindow = selected?.let(model.windows::get)
@@ -659,6 +669,16 @@ private fun SessionScreen(
     var showWindowMenu by remember(selected) { mutableStateOf(false) }
     var surfaceView by remember(selected) { mutableStateOf<RemoteSurfaceView?>(null) }
     var viewSize by remember(selected) { mutableStateOf(IntSize.Zero) }
+    var surfaceBottomInWindow by remember(selected) { mutableStateOf(0f) }
+    val windowHeightPx = rootView.rootView.height.toFloat().takeIf { it > 0f }
+        ?: with(density) { configuration.screenHeightDp.dp.toPx() }
+    val imeBottomPx = WindowInsets.ime.getBottom(density)
+    val imeOverlapPx = if (surfaceBottomInWindow > 0f) {
+        (imeBottomPx - (windowHeightPx - surfaceBottomInWindow)).coerceAtLeast(0f)
+    } else {
+        0f
+    }
+    val imePanOffset = IntOffset(0, -imeOverlapPx.roundToInt())
 
     LaunchedEffect(nativeScale) {
         model.applyWaylandScale(nativeScale)
@@ -721,7 +741,11 @@ private fun SessionScreen(
                                 Modifier
                             },
                         )
-                        .background(Color.Black),
+                        .background(Color.Black)
+                        .onGloballyPositioned { coordinates ->
+                            surfaceBottomInWindow = coordinates.boundsInWindow().bottom
+                        }
+                        .clipToBounds(),
                 ) {
                     val ratio = selectedWindow?.aspectRatio
                     if (selected != null && selectedWindow != null) {
@@ -748,7 +772,7 @@ private fun SessionScreen(
                                 onRelease = { view ->
                                     if (surfaceView === view) surfaceView = null
                                 },
-                                modifier = Modifier.fillMaxSize(),
+                                modifier = Modifier.fillMaxSize().offset { imePanOffset },
                             )
                         }
                     } else {

@@ -322,11 +322,13 @@ is active.
   Menu, and multi-window switching in a 72dp end-side rail; both the rail and the remote view stay
   clear of status bars, navigation bars, and display cutouts, and landscape status text is shown
   inside **Menu** instead of consuming vertical space.
-- Opening or closing the soft keyboard overlays the remote view without changing its geometry.
-  Resizing a `SurfaceView` through every keyboard animation frame stretched old pixels, reallocated
-  the GPU surface dozens of times per animation, and repeatedly reconfigured remote windows under
-  Auto-resize, so stable geometry changes (rotation, fullscreen, rails, system bars, and scale) are
-  deliberately kept separate from transient IME visibility.
+- Opening the soft keyboard translates the remote `SurfaceView` upward in lockstep with
+  `WindowInsets.ime` until its bottom edge rests above the keyboard; the container clips the top
+  edge, and closing the keyboard moves it back. `Modifier.offset` only changes placement and never
+  remeasures the view, so there are no GPU surface reallocations, stretched old frames, or
+  Auto-resize reconfigurations. Moving only the remote view keeps the app bar and side rail
+  reachable, and `RemoteSurfaceView` keeps its own Android View bounds so touch and pointer
+  coordinates stay accurate.
 - The screen stays awake while a session is open and the original screen-on/insets behavior is
   restored when the session closes or the UI is destroyed.
 
