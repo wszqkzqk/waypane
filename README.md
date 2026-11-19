@@ -100,7 +100,7 @@ Wayland frame callbacks.
   drag, and long-press sends a right click. A window-menu switch selects native Direct touch
   instead without delivering both protocols. Pointer presses set keyboard focus, and tracked
   buttons are released even when the finger or mouse is lifted in a letterbox area. The soft
-  keyboard opens only from **Show keyboard**, never on every touch
+  keyboard opens only from the dedicated **Keyboard** button or **Show keyboard**, never on every touch
 - `wl_pointer.set_cursor` tracks each pointer object's focus and latest `enter` serial, ignores
   stale serials, rejects conflicting surface roles, supports `NULL` hiding, and decrements
   hotspots on committed `wl_surface.offset`. Destroying an active cursor surface or pointer hides
@@ -264,8 +264,10 @@ black bars are presentation-only and never become remote input.
 - Enable **Direct touch input** in the window menu to send native `wl_touch` down, motion, and
   up events instead. Beginning a two-finger viewport gesture cancels the active touch or drag so
   the remote application is not left with a stuck contact or button.
-- Ordinary touches never open the soft keyboard; use **Menu → Show keyboard** in portrait or
-  fullscreen mode. Hardware keyboard and pointer input remain available.
+- Ordinary touches never open the soft keyboard. Use the dedicated **Keyboard** button in the app
+  bar or fullscreen overlay (or **Menu → Show keyboard**) when text input is needed; focus is
+  requested only after the action's window/dialog has released it. Hardware keyboard and pointer
+  input remain available.
 - Add a second finger to pinch between 1x and 8x and drag to pan any enlarged axis. Beginning this
   gesture cancels an active remote touch instead of leaving a contact stuck down.
 - At 1x fit, where there is nothing to pan, a two-finger drag is forwarded as smooth scrolling.

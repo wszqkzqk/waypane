@@ -484,11 +484,12 @@ class RemoteSurfaceView(
     }
 
     fun showKeyboard() {
-        requestFocus()
         post {
-            if (isAttachedToWindow) {
-                inputMethodManager?.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
-            }
+            if (!isAttachedToWindow) return@post
+            requestFocus()
+            val accepted =
+                inputMethodManager?.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT) == true
+            if (!accepted) Log.w(TAG, "System input method rejected showSoftInput")
         }
     }
 

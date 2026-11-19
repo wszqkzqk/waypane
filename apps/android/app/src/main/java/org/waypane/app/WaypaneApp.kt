@@ -450,6 +450,7 @@ private fun SessionScreen(model: WaypaneViewModel, state: UiState) {
                     },
                     actions = {
                         if (selectedWindow != null) {
+                            TextButton(onClick = { surfaceView?.showKeyboard() }) { Text("Keyboard") }
                             TextButton(onClick = { surfaceView?.resetViewport() }) { Text("Fit") }
                             TextButton(onClick = { showWindowMenu = true }) { Text("Menu") }
                         }
@@ -532,14 +533,19 @@ private fun SessionScreen(model: WaypaneViewModel, state: UiState) {
                     }
                 }
                 if (state.immersive && selectedWindow != null) {
-                    TextButton(
-                        onClick = { showWindowMenu = true },
+                    Row(
                         modifier = Modifier
                             .align(Alignment.TopEnd)
                             .padding(8.dp)
                             .background(Color.Black.copy(alpha = 0.6f), MaterialTheme.shapes.small),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text("Menu", color = Color.White)
+                        TextButton(onClick = { surfaceView?.showKeyboard() }) {
+                            Text("Keyboard", color = Color.White)
+                        }
+                        TextButton(onClick = { showWindowMenu = true }) {
+                            Text("Menu", color = Color.White)
+                        }
                     }
                 }
             }
