@@ -51,6 +51,7 @@ data class ConnectionProfile(
     val remoteSocket: String = "",
     val compression: String = "lz4",
     val command: String = "foot",
+    val autoResize: Boolean = false,
 )
 
 data class UiState(
@@ -61,6 +62,8 @@ data class UiState(
     val activeSessions: Set<Long> = emptySet(),
     val connecting: Boolean = false,
     val hostKeyPrompt: EngineEvent.HostKeyPrompt? = null,
+    val immersive: Boolean = false,
+    val autoResize: Boolean = false,
 )
 
 class WaypaneViewModel(application: Application) : AndroidViewModel(application) {
@@ -184,6 +187,8 @@ class WaypaneViewModel(application: Application) : AndroidViewModel(application)
             activeSessions = emptySet(),
             connecting = true,
             hostKeyPrompt = null,
+            autoResize = profile.autoResize,
+            immersive = false,
         )
         appendLog("Connecting to ${profile.host}:${profile.port}")
         viewModelScope.launch { consumeEvents(freshHandle) }
@@ -309,6 +314,18 @@ class WaypaneViewModel(application: Application) : AndroidViewModel(application)
         }
         returnToSetup()
         reportError("SSH host key rejected for ${prompt?.host ?: "host"}${prompt?.let { ":${it.port}" }.orEmpty()}")
+    }
+
+    fun setAutoResize(enabled: Boolean) {
+        uiState = uiState.copy(autoResize = enabled)
+    }
+
+    fun toggleImmersive() {
+        uiState = uiState.copy(immersive = !uiState.immersive)
+    }
+
+    fun exitImmersive() {
+        uiState = uiState.copy(immersive = false)
     }
 
     fun selectWindow(key: SurfaceKey) {

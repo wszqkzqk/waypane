@@ -28,7 +28,7 @@ pub enum ActorCommand {
     Presented(SurfaceKey, u64),
     TouchDown(SurfaceKey, i32, f64, f64),
     TouchMotion(SurfaceKey, i32, f64, f64),
-    TouchUp(SurfaceKey, i32),
+    TouchUp(SurfaceKey, i32, f64, f64),
     TouchCancel(SurfaceKey),
     Scroll(SurfaceKey, f64, f64, f64, f64),
     Key(SurfaceKey, u32, bool),
@@ -201,7 +201,9 @@ async fn run_actor(
                     ActorCommand::Presented(key, version) => (key.session, lock(&engine).presented(key, version)),
                     ActorCommand::TouchDown(key, pointer, x, y) => (key.session, lock(&engine).touch_down(key, pointer, x, y)),
                     ActorCommand::TouchMotion(key, pointer, x, y) => (key.session, lock(&engine).touch_motion(key, pointer, x, y)),
-                    ActorCommand::TouchUp(key, pointer) => (key.session, lock(&engine).touch_up(key, pointer)),
+                    ActorCommand::TouchUp(key, pointer, x, y) => {
+                        (key.session, lock(&engine).touch_up(key, pointer, x, y))
+                    }
                     ActorCommand::TouchCancel(key) => (key.session, lock(&engine).touch_cancel(key)),
                     ActorCommand::Scroll(key, x, y, horizontal, vertical) => (key.session, lock(&engine).scroll(key, x, y, horizontal, vertical)),
                     ActorCommand::Key(key, code, pressed) => (key.session, lock(&engine).key(key, code, pressed)),

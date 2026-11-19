@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Process
+import android.text.InputType
 import android.util.Log
 import android.view.Choreographer
 import android.view.InputDevice
@@ -12,26 +13,64 @@ import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
-import android.text.InputType
+import kotlin.math.abs
+import kotlin.math.hypot
+import kotlin.math.max
+import kotlin.math.min
 
 class RemoteSurfaceView(
     context: Context,
     private val key: SurfaceKey,
+    contentAspectRatio: Float,
     private val nativeHandle: () -> Long,
     private val onUnsupportedText: (String) -> Unit = {},
     private val onError: (String) -> Unit = {},
 ) : SurfaceView(context), SurfaceHolder.Callback, Choreographer.FrameCallback {
 
     @Volatile
+    private var contentAspectRatio =
+        if (contentAspectRatio.isFinite() && contentAspectRatio > 0f) contentAspectRatio else 1f
+
+    @Volatile
     private var attached = false
     private var waitingForFrame = false
-    private var seenVersion = 0L
+    private var zoom = MIN_VIEWPORT_ZOOM
+    private var panX = 0f
+    private var panY = 0f
+    private var viewportGesture = false
+    private var gestureStartedAt = 0L
+    private var gestureStartSpan = 1f
+    private var gestureStartCenterX = 0.5f
+    private var gestureStartCenterY = 0.5f
+    private var gestureLastCenterX = 0.5f
+    private var gestureLastCenterY = 0.5f
+    private var gestureStartZoom = MIN_VIEWPORT_ZOOM
+    private var gestureStartPanX = 0f
+    private var gestureStartPanY = 0f
+    private var gestureTravel = 0f
+    private var gestureSpanDelta = 0f
+    private var gestureScroll = false
+    private var gestureEnding = false
+    private var scrollPosted = false
+    private var pendingScrollX = 0f
+    private var pendingScrollY = 0f
+    private var pendingHorizontal = 0f
+    private var pendingVertical = 0f
+    private val scrollDispatcher = Runnable { dispatchPendingScroll() }
     private val activePointers = mutableSetOf<Int>()
+    private val touchSlopPx = ViewConfiguration.get(context).scaledTouchSlop * 2f
     private val inputMethodManager = context.getSystemService(InputMethodManager::class.java)
+
+    private data class GestureGeometry(
+        val x: Float,
+        val y: Float,
+        val spanPx: Float,
+    )
 
     init {
         holder.addCallback(this)
@@ -50,7 +89,6 @@ class RemoteSurfaceView(
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
-        seenVersion = 0L
         renderHandler.post {
             val handle = handle()
             if (handle == 0L) return@post
@@ -64,7 +102,6 @@ class RemoteSurfaceView(
                     height.coerceAtLeast(1),
                 )
                 if (!attached) error("nativeAttachSurface returned false")
-                NativeBridge.nativeResizeSurface(handle, key.session, key.window, width, height)
             }.onFailure { error ->
                 reportRenderError("Failed to initialize Android GPU surface", error)
             }
@@ -122,11 +159,11 @@ class RemoteSurfaceView(
         renderHandler.post {
             waitingForFrame = false
             detachNativeSurface(handle)
-            seenVersion = 0L
         }
     }
 
     override fun onDetachedFromWindow() {
+        clearPendingScroll()
         val handle = handle()
         if (attached) wakeNativeSurface(handle)
         attached = false
@@ -152,7 +189,6 @@ class RemoteSurfaceView(
                     handle,
                     key.session,
                     key.window,
-                    seenVersion,
                     DIRTY_WAIT_MS,
                 )
             }.onFailure { error ->
@@ -160,7 +196,6 @@ class RemoteSurfaceView(
             }.getOrNull() ?: return@post
             waitingForFrame = false
             if (version > 0L && attached && handle == handle()) {
-                seenVersion = version
                 Choreographer.getInstance().postFrameCallback(this@RemoteSurfaceView)
             } else if (attached && handle == handle()) {
                 scheduleDirtyWait()
@@ -205,6 +240,282 @@ class RemoteSurfaceView(
         if (width <= 0 || height <= 0) return false
         val handle = handle()
         if (handle == 0L) return false
+        if (handleViewportGesture(event)) return true
+        return handleRemoteTouch(event, handle)
+    }
+
+    private fun handleViewportGesture(event: MotionEvent): Boolean {
+        val handle = handle()
+        if (handle == 0L) return false
+        when (event.actionMasked) {
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                if (event.pointerCount >= 2) {
+                    startViewportGesture(event, handle)
+                    return true
+                }
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (viewportGesture) {
+                    updateViewportGesture(event)
+                    return true
+                }
+            }
+            MotionEvent.ACTION_POINTER_UP -> {
+                if (viewportGesture) {
+                    if (event.pointerCount == 2) {
+                        gestureEnding = true
+                        finishTwoFingerTapIfEligible(event)
+                    }
+                    return true
+                }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                if (viewportGesture) {
+                    if (event.actionMasked == MotionEvent.ACTION_CANCEL) clearPendingScroll()
+                    viewportGesture = false
+                    gestureEnding = false
+                    return true
+                }
+            }
+        }
+        return viewportGesture
+    }
+
+    private fun startViewportGesture(event: MotionEvent, handle: Long) {
+        clearPendingScroll()
+        if (activePointers.isNotEmpty()) {
+            val cancelled = runCatching {
+                NativeBridge.nativeTouchCancel(handle, key.session, key.window)
+            }.getOrNull()
+            activePointers.clear()
+            if (cancelled != true) {
+                reportRenderError(
+                    "Failed to cancel remote touch before viewport gesture",
+                    IllegalStateException("Touch queue is closed or full"),
+                )
+                return
+            }
+        }
+        viewportGesture = true
+        val geometry = gestureGeometry(event)
+        gestureStartedAt = event.eventTime
+        gestureStartSpan = geometry.spanPx
+        gestureStartCenterX = geometry.x
+        gestureStartCenterY = geometry.y
+        gestureLastCenterX = geometry.x
+        gestureLastCenterY = geometry.y
+        gestureStartZoom = zoom
+        gestureStartPanX = panX
+        gestureStartPanY = panY
+        gestureTravel = 0f
+        gestureSpanDelta = 0f
+        gestureScroll = false
+        gestureEnding = false
+    }
+
+    private fun updateViewportGesture(event: MotionEvent) {
+        if (gestureEnding) return
+        val geometry = gestureGeometry(event)
+        gestureTravel = max(
+            gestureTravel,
+            hypot(
+                (geometry.x - gestureStartCenterX) * width,
+                (geometry.y - gestureStartCenterY) * height,
+            ),
+        )
+        gestureSpanDelta = max(gestureSpanDelta, abs(geometry.spanPx - gestureStartSpan))
+        val (limitX, limitY) = panLimits(gestureStartZoom)
+        if (gestureSpanDelta <= touchSlopPx &&
+            limitX == 0f && limitY == 0f &&
+            gestureTravel > touchSlopPx
+        ) {
+            gestureScroll = true
+        }
+
+        if (gestureScroll && gestureSpanDelta <= touchSlopPx) {
+            queueRemoteScroll(geometry)
+        } else {
+            if (gestureScroll) clearPendingScroll()
+            gestureScroll = false
+            val targetZoom = gestureStartZoom * (geometry.spanPx / gestureStartSpan)
+            val ratio = targetZoom / gestureStartZoom
+            applyViewport(
+                targetZoom,
+                transformedPan(gestureStartPanX, gestureStartCenterX, geometry.x, ratio),
+                transformedPan(gestureStartPanY, gestureStartCenterY, geometry.y, ratio),
+            )
+        }
+        gestureLastCenterX = geometry.x
+        gestureLastCenterY = geometry.y
+    }
+
+    private fun finishTwoFingerTapIfEligible(event: MotionEvent) {
+        if (event.eventTime - gestureStartedAt > TWO_FINGER_TAP_TIMEOUT_MS ||
+            gestureTravel > touchSlopPx ||
+            gestureSpanDelta > touchSlopPx
+        ) {
+            return
+        }
+        if (zoom > MIN_VIEWPORT_ZOOM + VIEWPORT_EPSILON) {
+            applyViewport(MIN_VIEWPORT_ZOOM, 0f, 0f)
+            return
+        }
+        val geometry = gestureGeometry(event)
+        val ratio = DOUBLE_TAP_ZOOM / zoom
+        applyViewport(
+            DOUBLE_TAP_ZOOM,
+            transformedPan(panX, geometry.x, geometry.x, ratio),
+            transformedPan(panY, geometry.y, geometry.y, ratio),
+        )
+    }
+
+    private fun transformedPan(startPan: Float, startCenter: Float, center: Float, ratio: Float): Float =
+        ratio * (startPan - startCenter + 0.5f) + center - 0.5f
+
+    private fun queueRemoteScroll(geometry: GestureGeometry) {
+        pendingScrollX = geometry.x
+        pendingScrollY = geometry.y
+        pendingHorizontal = (pendingHorizontal +
+            (gestureLastCenterX - geometry.x) * VIEWPORT_SCROLL_SCALE)
+            .coerceIn(-MAX_PENDING_SCROLL, MAX_PENDING_SCROLL)
+        pendingVertical = (pendingVertical +
+            (gestureLastCenterY - geometry.y) * VIEWPORT_SCROLL_SCALE)
+            .coerceIn(-MAX_PENDING_SCROLL, MAX_PENDING_SCROLL)
+        schedulePendingScroll()
+    }
+
+    private fun schedulePendingScroll() {
+        if (scrollPosted) return
+        scrollPosted = true
+        postOnAnimation(scrollDispatcher)
+    }
+
+    private fun dispatchPendingScroll() {
+        scrollPosted = false
+        if (pendingHorizontal == 0f && pendingVertical == 0f) return
+        val handle = handle()
+        if (handle == 0L) {
+            clearPendingScroll()
+            return
+        }
+        val accepted = runCatching {
+            NativeBridge.nativeScroll(
+                handle,
+                key.session,
+                key.window,
+                pendingScrollX,
+                pendingScrollY,
+                pendingHorizontal,
+                pendingVertical,
+            )
+        }.getOrElse { error ->
+            clearPendingScroll()
+            reportRenderError("Failed to forward Wayland scroll", error)
+            return
+        }
+        if (accepted) {
+            pendingHorizontal = 0f
+            pendingVertical = 0f
+        } else if (viewportGesture) {
+            schedulePendingScroll()
+        } else {
+            pendingHorizontal = 0f
+            pendingVertical = 0f
+        }
+    }
+
+    private fun clearPendingScroll() {
+        removeCallbacks(scrollDispatcher)
+        scrollPosted = false
+        pendingHorizontal = 0f
+        pendingVertical = 0f
+    }
+
+    private fun gestureGeometry(event: MotionEvent): GestureGeometry {
+        var minX = Float.POSITIVE_INFINITY
+        var maxX = Float.NEGATIVE_INFINITY
+        var minY = Float.POSITIVE_INFINITY
+        var maxY = Float.NEGATIVE_INFINITY
+        var sumX = 0f
+        var sumY = 0f
+        for (index in 0 until event.pointerCount) {
+            val x = event.getX(index)
+            val y = event.getY(index)
+            minX = min(minX, x)
+            maxX = max(maxX, x)
+            minY = min(minY, y)
+            maxY = max(maxY, y)
+            sumX += x
+            sumY += y
+        }
+        val count = event.pointerCount.coerceAtLeast(1)
+        return GestureGeometry(
+            sumX / count / width,
+            sumY / count / height,
+            hypot(maxX - minX, maxY - minY).coerceAtLeast(1f),
+        )
+    }
+
+    fun updateContentAspectRatio(ratio: Float) {
+        contentAspectRatio = if (ratio.isFinite() && ratio > 0f) ratio else 1f
+        applyViewport(zoom, panX, panY)
+    }
+
+    fun resetViewport() {
+        applyViewport(MIN_VIEWPORT_ZOOM, 0f, 0f)
+    }
+
+    private fun panLimits(zoom: Float): Pair<Float, Float> {
+        if (width <= 0 || height <= 0) return 0f to 0f
+        val viewAspect = width.toFloat() / height.toFloat()
+        val bufferAspect = contentAspectRatio.coerceAtLeast(0.0001f)
+        val (drawWidth, drawHeight) = if (bufferAspect >= viewAspect) {
+            zoom to zoom * viewAspect / bufferAspect
+        } else {
+            zoom * bufferAspect / viewAspect to zoom
+        }
+        return ((drawWidth - 1f).coerceAtLeast(0f) * 0.5f) to
+            ((drawHeight - 1f).coerceAtLeast(0f) * 0.5f)
+    }
+
+    private fun applyViewport(targetZoom: Float, targetPanX: Float, targetPanY: Float) {
+        if (!targetZoom.isFinite() || !targetPanX.isFinite() || !targetPanY.isFinite()) return
+        val nextZoom = targetZoom.coerceIn(MIN_VIEWPORT_ZOOM, MAX_VIEWPORT_ZOOM)
+        val (limitX, limitY) = panLimits(nextZoom)
+        val nextPanX = targetPanX.coerceIn(-limitX, limitX)
+        val nextPanY = targetPanY.coerceIn(-limitY, limitY)
+        if (abs(zoom - nextZoom) <= VIEWPORT_EPSILON &&
+            abs(panX - nextPanX) <= VIEWPORT_EPSILON &&
+            abs(panY - nextPanY) <= VIEWPORT_EPSILON
+        ) {
+            return
+        }
+        zoom = nextZoom
+        panX = nextPanX
+        panY = nextPanY
+        sendViewport()
+    }
+
+    private fun sendViewport() {
+        val handle = handle()
+        if (handle == 0L) return
+        runCatching {
+            NativeBridge.nativeSetViewport(
+                handle,
+                key.session,
+                key.window,
+                zoom,
+                panX,
+                panY,
+            )
+        }.onFailure { error ->
+            reportRenderError("Failed to update viewport", error)
+            return
+        }
+        renderHandler.post { requestRenderIfDirty() }
+    }
+
+    private fun handleRemoteTouch(event: MotionEvent, handle: Long): Boolean {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
                 requestFocus()
@@ -414,6 +725,13 @@ class RemoteSurfaceView(
         private const val RENDER_PRESENTED = 1
         private const val RENDER_RETRY = 2
         private const val RENDER_OCCLUDED = 3
+        private const val MIN_VIEWPORT_ZOOM = 1f
+        private const val MAX_VIEWPORT_ZOOM = 8f
+        private const val DOUBLE_TAP_ZOOM = 2.5f
+        private const val TWO_FINGER_TAP_TIMEOUT_MS = 250L
+        private const val VIEWPORT_SCROLL_SCALE = 80f
+        private const val MAX_PENDING_SCROLL = 1_000f
+        private const val VIEWPORT_EPSILON = 1e-5f
         private const val TOUCH_DOWN = 0
         private const val TOUCH_MOTION = 1
         private const val TOUCH_UP = 2

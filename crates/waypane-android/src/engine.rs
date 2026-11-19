@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use bytes::{Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 use waypane_core::{Connection, CoreEvent, Frame, Point, Size, WindowId, WindowKind};
-use waypane_render::{Canvas, ImageError};
+use waypane_render::{Canvas, ImageError, Viewport, ViewportTransform};
 use waypane_transport::HostKeyPrompt as TransportHostKeyPrompt;
 use waypipe_client::{ClientConfig, Compression};
 
@@ -123,8 +123,8 @@ impl SurfaceSignal {
         self.condvar.notify_all();
     }
 
-    pub fn wait_dirty(&self, seen_version: u64, timeout: Duration) -> Option<u64> {
-        if let Some(version) = self.dirty_version(seen_version) {
+    pub fn wait_dirty(&self, timeout: Duration) -> Option<u64> {
+        if let Some(version) = self.dirty_version() {
             return Some(version);
         }
         let epoch = self.wake_epoch.load(Ordering::Acquire);
@@ -132,22 +132,18 @@ impl SurfaceSignal {
             .wait_lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(version) = self.dirty_version(seen_version) {
+        if let Some(version) = self.dirty_version() {
             return Some(version);
         }
         let _ = self.condvar.wait_timeout_while(guard, timeout, |_| {
-            self.dirty_version(seen_version).is_none()
-                && self.wake_epoch.load(Ordering::Acquire) == epoch
+            self.dirty_version().is_none() && self.wake_epoch.load(Ordering::Acquire) == epoch
         });
-        self.dirty_version(seen_version)
+        self.dirty_version()
     }
 
-    fn dirty_version(&self, seen_version: u64) -> Option<u64> {
-        if !self.is_dirty() {
-            return None;
-        }
-        let version = self.version.load(Ordering::Acquire);
-        (version > seen_version).then_some(version)
+    fn dirty_version(&self) -> Option<u64> {
+        self.is_dirty()
+            .then_some(self.version.load(Ordering::Acquire))
     }
 }
 
@@ -156,6 +152,9 @@ pub struct AndroidSurface {
     pub canvas: Canvas,
     pub version: u64,
     pub signal: Arc<SurfaceSignal>,
+    pub viewport: Viewport,
+    view_size: Size,
+    touch_active: bool,
     scale: i32,
     frames: VecDeque<(u64, u64)>,
 }
@@ -166,6 +165,12 @@ impl AndroidSurface {
             canvas: Canvas::default(),
             version: 0,
             signal: Arc::new(SurfaceSignal::default()),
+            viewport: Viewport::default(),
+            view_size: Size {
+                width: 1,
+                height: 1,
+            },
+            touch_active: false,
             scale: 1,
             frames: VecDeque::new(),
         }
@@ -173,6 +178,27 @@ impl AndroidSurface {
 
     pub fn signal(&self) -> Arc<SurfaceSignal> {
         self.signal.clone()
+    }
+
+    pub fn set_viewport(&mut self, viewport: Viewport) {
+        let effective = ViewportTransform::new(self.canvas.size(), self.view_size, viewport)
+            .map_or_else(|| viewport.sanitize(), |transform| transform.viewport());
+        if self.viewport != effective {
+            self.viewport = effective;
+            let version = self.version;
+            self.signal.mark_dirty(version);
+        }
+    }
+
+    pub fn set_view_size(&mut self, size: Size) {
+        if size.width == 0 || size.height == 0 || self.view_size == size {
+            return;
+        }
+        self.view_size = size;
+        self.viewport = ViewportTransform::new(self.canvas.size(), size, self.viewport)
+            .map_or(self.viewport, |transform| transform.viewport());
+        let version = self.version;
+        self.signal.mark_dirty(version);
     }
 }
 
@@ -186,8 +212,6 @@ pub enum EngineError {
     UnknownSession(SessionId),
     #[error("unknown Android surface {0:?}")]
     UnknownSurface(SurfaceKey),
-    #[error("surface {0:?} has no rendered frame")]
-    EmptySurface(SurfaceKey),
     #[error("text input rejected: {0}")]
     TextInput(String),
 }
@@ -306,24 +330,55 @@ impl AndroidEngine {
         windows
     }
 
+    pub fn set_viewport(
+        &mut self,
+        key: SurfaceKey,
+        viewport: Viewport,
+    ) -> Result<EngineOutput, EngineError> {
+        let surface = self.surface(key).ok_or(EngineError::UnknownSurface(key))?;
+        surface
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .set_viewport(viewport);
+        Ok(EngineOutput::default())
+    }
+
+    pub fn set_view_size(
+        &mut self,
+        key: SurfaceKey,
+        size: Size,
+    ) -> Result<EngineOutput, EngineError> {
+        let surface = self.surface(key).ok_or(EngineError::UnknownSurface(key))?;
+        surface
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .set_view_size(size);
+        Ok(EngineOutput::default())
+    }
+
     pub fn logical_point(
         &self,
         key: SurfaceKey,
         x: f64,
         y: f64,
-    ) -> Result<(f64, f64), EngineError> {
+    ) -> Result<Option<(f64, f64)>, EngineError> {
         let surface = self.surface(key).ok_or(EngineError::UnknownSurface(key))?;
         let surface = surface
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if surface.canvas.size().width == 0 || surface.canvas.size().height == 0 {
-            return Err(EngineError::EmptySurface(key));
-        }
+        let size = surface.canvas.size();
+        let Some(transform) = ViewportTransform::new(size, surface.view_size, surface.viewport)
+        else {
+            return Ok(None);
+        };
+        let Some((x, y)) = transform.view_to_content(x as f32, y as f32) else {
+            return Ok(None);
+        };
         let scale = f64::from(surface.scale.max(1));
-        Ok((
-            x.clamp(0.0, 1.0) * f64::from(surface.canvas.size().width) / scale,
-            y.clamp(0.0, 1.0) * f64::from(surface.canvas.size().height) / scale,
-        ))
+        Ok(Some((
+            f64::from(x) * f64::from(size.width) / scale,
+            f64::from(y) * f64::from(size.height) / scale,
+        )))
     }
 
     pub fn presented(
@@ -363,6 +418,24 @@ impl AndroidEngine {
         })
     }
 
+    fn is_touch_active(&self, key: SurfaceKey) -> Result<bool, EngineError> {
+        let surface = self.surface(key).ok_or(EngineError::UnknownSurface(key))?;
+        let active = surface
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .touch_active;
+        Ok(active)
+    }
+
+    fn set_touch_active(&mut self, key: SurfaceKey, active: bool) -> Result<(), EngineError> {
+        let surface = self.surface(key).ok_or(EngineError::UnknownSurface(key))?;
+        surface
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .touch_active = active;
+        Ok(())
+    }
+
     pub fn touch_down(
         &mut self,
         key: SurfaceKey,
@@ -370,7 +443,9 @@ impl AndroidEngine {
         x: f64,
         y: f64,
     ) -> Result<EngineOutput, EngineError> {
-        let (x, y) = self.logical_point(key, x, y)?;
+        let Some((x, y)) = self.logical_point(key, x, y)? else {
+            return Ok(EngineOutput::default());
+        };
         let time = self.millis();
         let connection = self
             .connections
@@ -382,6 +457,7 @@ impl AndroidEngine {
         connection
             .compositor_mut()
             .touch_down(key.window, id, x, y, time)?;
+        self.set_touch_active(key, true)?;
         self.flush(key.session)
     }
 
@@ -392,7 +468,12 @@ impl AndroidEngine {
         x: f64,
         y: f64,
     ) -> Result<EngineOutput, EngineError> {
-        let (x, y) = self.logical_point(key, x, y)?;
+        if !self.is_touch_active(key)? {
+            return Ok(EngineOutput::default());
+        }
+        let Some((x, y)) = self.logical_point(key, x, y)? else {
+            return self.touch_cancel(key);
+        };
         let time = self.millis();
         self.connections
             .get_mut(&key.session)
@@ -402,22 +483,39 @@ impl AndroidEngine {
         self.flush(key.session)
     }
 
-    pub fn touch_up(&mut self, key: SurfaceKey, id: i32) -> Result<EngineOutput, EngineError> {
+    pub fn touch_up(
+        &mut self,
+        key: SurfaceKey,
+        id: i32,
+        x: f64,
+        y: f64,
+    ) -> Result<EngineOutput, EngineError> {
+        if !self.is_touch_active(key)? {
+            return Ok(EngineOutput::default());
+        }
+        if self.logical_point(key, x, y)?.is_none() {
+            return self.touch_cancel(key);
+        }
         let time = self.millis();
         self.connections
             .get_mut(&key.session)
             .ok_or(EngineError::UnknownSession(key.session))?
             .compositor_mut()
             .touch_up(id, time);
+        self.set_touch_active(key, false)?;
         self.flush(key.session)
     }
 
     pub fn touch_cancel(&mut self, key: SurfaceKey) -> Result<EngineOutput, EngineError> {
+        if !self.is_touch_active(key)? {
+            return Ok(EngineOutput::default());
+        }
         self.connections
             .get_mut(&key.session)
             .ok_or(EngineError::UnknownSession(key.session))?
             .compositor_mut()
             .touch_cancel();
+        self.set_touch_active(key, false)?;
         self.flush(key.session)
     }
 
@@ -429,7 +527,9 @@ impl AndroidEngine {
         horizontal: f64,
         vertical: f64,
     ) -> Result<EngineOutput, EngineError> {
-        let (x, y) = self.logical_point(key, x, y)?;
+        let Some((x, y)) = self.logical_point(key, x, y)? else {
+            return Ok(EngineOutput::default());
+        };
         let time = self.millis();
         let connection = self
             .connections
@@ -476,7 +576,9 @@ impl AndroidEngine {
         y: f64,
         button: Option<(u32, bool)>,
     ) -> Result<EngineOutput, EngineError> {
-        let (x, y) = self.logical_point(key, x, y)?;
+        let Some((x, y)) = self.logical_point(key, x, y)? else {
+            return Ok(EngineOutput::default());
+        };
         let time = self.millis();
         let connection = self
             .connections
@@ -979,7 +1081,7 @@ mod tests {
                     0.5
                 )
                 .unwrap(),
-            (0.5, 0.25)
+            Some((0.5, 0.25))
         );
 
         engine.disconnect(1, false).unwrap();
@@ -1059,5 +1161,89 @@ mod tests {
             })
             .unwrap();
         assert_eq!(surface.lock().unwrap().version, 2);
+    }
+    #[test]
+    fn viewport_redraw_preserves_frame_completion_and_touch_sequencing() {
+        let mut engine = AndroidEngine::new(Compression::None);
+        engine.connected(1);
+        engine.receive(1, &header()).unwrap();
+        let key = SurfaceKey {
+            session: 1,
+            window: 1,
+        };
+        engine
+            .apply_core_events(1, vec![window(1, 1, WindowKind::Toplevel)])
+            .unwrap();
+        open_pool(&mut engine, 1, waypipe_client::Rid(1), [0, 0, 0, 0]);
+        engine
+            .apply_core_events(1, vec![frame(1, 10, waypipe_client::Rid(1))])
+            .unwrap();
+
+        let surface = engine.surface(key).unwrap();
+        assert_eq!(surface.lock().unwrap().version, 1);
+        engine
+            .set_view_size(
+                key,
+                Size {
+                    width: 200,
+                    height: 100,
+                },
+            )
+            .unwrap();
+        let center = engine.logical_point(key, 0.5, 0.5).unwrap();
+        assert_eq!(center, Some((0.25, 0.25)));
+        assert_eq!(engine.logical_point(key, 0.1, 0.5).unwrap(), None);
+        assert!(engine
+            .touch_down(key, 1, 0.1, 0.5)
+            .unwrap()
+            .outgoing
+            .is_empty());
+        assert!(!surface.lock().unwrap().touch_active);
+
+        surface.lock().unwrap().signal.mark_clean();
+        engine
+            .set_viewport(
+                key,
+                Viewport {
+                    zoom: 2.0,
+                    pan_x: 0.0,
+                    pan_y: 0.0,
+                },
+            )
+            .unwrap();
+        assert_eq!(surface.lock().unwrap().version, 1);
+        assert_eq!(
+            surface.lock().unwrap().signal.wait_dirty(Duration::ZERO),
+            Some(1)
+        );
+        let (x, y) = engine.logical_point(key, 0.1, 0.5).unwrap().unwrap();
+        assert!((x - 0.05).abs() < 1e-5, "unexpected logical x {x}");
+        assert!((y - 0.25).abs() < 1e-5, "unexpected logical y {y}");
+
+        assert_eq!(surface.lock().unwrap().frames.len(), 1);
+        engine
+            .set_viewport(
+                key,
+                Viewport {
+                    zoom: 3.0,
+                    pan_x: 0.0,
+                    pan_y: 0.0,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            surface.lock().unwrap().signal.wait_dirty(Duration::ZERO),
+            Some(1)
+        );
+        assert_eq!(surface.lock().unwrap().frames.len(), 1);
+
+        engine.set_viewport(key, Viewport::default()).unwrap();
+        engine.touch_down(key, 0, 0.5, 0.5).unwrap();
+        assert!(surface.lock().unwrap().touch_active);
+        engine.touch_motion(key, 0, 0.1, 0.5).unwrap();
+        assert!(!surface.lock().unwrap().touch_active);
+        let ignored_up = engine.touch_up(key, 0, 0.5, 0.5).unwrap();
+        assert!(ignored_up.outgoing.is_empty());
+        assert!(engine.connections.contains_key(&1));
     }
 }

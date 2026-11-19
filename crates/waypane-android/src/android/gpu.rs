@@ -9,6 +9,7 @@ use jni::refs::Global;
 use jni::Env;
 use raw_window_handle::{AndroidDisplayHandle, AndroidNdkWindowHandle};
 use waypane_core::Size;
+use waypane_render::ViewportTransform;
 
 use crate::{ActorHandle, AndroidSurface, SurfaceKey};
 
@@ -48,6 +49,155 @@ unsafe impl Sync for NativeWindowRef {}
 impl Drop for NativeWindowRef {
     fn drop(&mut self) {
         unsafe { ANativeWindow_release(self.0.as_ptr()) };
+    }
+}
+
+struct ViewportBlitter {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    vertices: wgpu::Buffer,
+}
+
+impl ViewportBlitter {
+    fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        let vertices = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("waypane-viewport-vertices"),
+            size: std::mem::size_of::<[[f32; 4]; 6]>() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("waypane-viewport-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("waypane-viewport-bind-group-layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("waypane-viewport-pipeline-layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+        let shader = device.create_shader_module(wgpu::include_wgsl!("viewport.wgsl"));
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("waypane-viewport-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 4]>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2],
+                })],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        Self {
+            pipeline,
+            bind_group_layout,
+            sampler,
+            vertices,
+        }
+    }
+
+    fn draw(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        source: &wgpu::TextureView,
+        target: &wgpu::TextureView,
+        transform: &ViewportTransform,
+    ) {
+        queue.write_buffer(
+            &self.vertices,
+            0,
+            bytemuck::cast_slice(&transform.vertices()),
+        );
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("waypane-viewport-bind-group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("waypane-viewport-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_vertex_buffer(0, self.vertices.slice(..));
+        pass.draw(0..6, 0..1);
     }
 }
 
@@ -119,7 +269,8 @@ impl SurfacePlan {
 struct NativeSurface {
     texture: Option<wgpu::Texture>,
     texture_size: Size,
-    blitter: Option<wgpu::util::TextureBlitter>,
+    texture_version: Option<u64>,
+    blitter: Option<ViewportBlitter>,
     config: Option<wgpu::SurfaceConfiguration>,
     surface: ManuallyDrop<wgpu::Surface<'static>>,
     _window: NativeWindowRef,
@@ -149,6 +300,7 @@ impl NativeSurface {
         Ok(Self {
             texture: None,
             texture_size: Size::default(),
+            texture_version: None,
             blitter: None,
             config: None,
             surface: ManuallyDrop::new(surface),
@@ -182,7 +334,7 @@ impl NativeSurface {
         );
         let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         self.surface.configure(device, &config);
-        let blitter = wgpu::util::TextureBlitter::new(device, config.format);
+        let blitter = ViewportBlitter::new(device, config.format);
         if let Some(error) = pollster::block_on(error_scope.pop()) {
             let _ = blitter;
             return Err(format!(
@@ -230,31 +382,42 @@ impl NativeSurface {
                 view_formats: &[],
             }));
             self.texture_size = size;
+            self.texture_version = None;
         }
         let texture = self
             .texture
             .as_ref()
             .ok_or_else(|| "Android canvas texture was not allocated".to_string())?;
-        queue.write_texture(
-            texture.as_image_copy(),
-            state.canvas.rgba(),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(size.width * 4),
-                rows_per_image: Some(size.height),
-            },
-            wgpu::Extent3d {
-                width: size.width,
-                height: size.height,
-                depth_or_array_layers: 1,
-            },
-        );
+        if self.texture_version != Some(state.version) {
+            queue.write_texture(
+                texture.as_image_copy(),
+                state.canvas.rgba(),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(size.width * 4),
+                    rows_per_image: Some(size.height),
+                },
+                wgpu::Extent3d {
+                    width: size.width,
+                    height: size.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            self.texture_version = Some(state.version);
+        }
 
         let (width, height) = self
             .config
             .as_ref()
             .map(|config| (config.width, config.height))
             .ok_or_else(|| "Android surface has not been configured".to_string())?;
+        let transform = ViewportTransform::new(size, Size { width, height }, state.viewport)
+            .ok_or_else(|| {
+                format!(
+                    "cannot compute viewport transform for buffer {}x{} and view {}x{}",
+                    size.width, size.height, width, height
+                )
+            })?;
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
@@ -283,7 +446,7 @@ impl NativeSurface {
         let source = texture.create_view(&Default::default());
         let target = frame.texture.create_view(&Default::default());
         let mut encoder = device.create_command_encoder(&Default::default());
-        blitter.copy(device, &mut encoder, &source, &target);
+        blitter.draw(device, queue, &mut encoder, &source, &target, &transform);
         queue.submit([encoder.finish()]);
         queue.present(frame);
         let version = state.version;

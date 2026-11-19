@@ -33,10 +33,11 @@ object NativeBridge {
     ): Boolean
 
     external fun nativeResizeSurface(handle: Long, session: Long, window: Int, width: Int, height: Int)
+    external fun nativeSetViewport(handle: Long, session: Long, window: Int, zoom: Float, panX: Float, panY: Float)
     external fun nativeRender(handle: Long, session: Long, window: Int): Int
     external fun nativeDetachSurface(handle: Long, session: Long, window: Int)
     external fun nativeIsDirty(handle: Long, session: Long, window: Int): Boolean
-    external fun nativeWaitDirty(handle: Long, session: Long, window: Int, seenVersion: Long, timeoutMs: Int): Long
+    external fun nativeWaitDirty(handle: Long, session: Long, window: Int, timeoutMs: Int): Long
     external fun nativeWakeSurface(handle: Long, session: Long, window: Int)
     external fun nativeTouch(handle: Long, session: Long, window: Int, pointer: Int, action: Int, x: Float, y: Float): Boolean
     external fun nativeTouchCancel(handle: Long, session: Long, window: Int): Boolean

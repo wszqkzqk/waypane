@@ -3583,6 +3583,7 @@ name = "waypane-android"
 version = "0.1.0"
 dependencies = [
  "android_logger",
+ "bytemuck",
  "bytes",
  "jni",
  "log",

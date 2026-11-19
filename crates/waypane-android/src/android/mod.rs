@@ -13,11 +13,12 @@ use jni::objects::{JClass, JObject, JString};
 use jni::sys::{jboolean, jfloat, jint, jlong, jobject};
 use jni::{Env, EnvUnowned};
 use waypane_core::Size;
+use waypane_render::Viewport;
 use waypane_transport::{Authentication, HostKeyDecision, HostKeyPolicy, RemoteWaypipe, SshConfig};
 use waypipe_client::Compression;
 
 use crate::keycodes::android_keycode_to_evdev;
-use crate::{ActorCommand, ActorHandle, SessionId, SurfaceKey};
+use crate::{ActorCommand, ActorHandle, AndroidSurface, EngineError, SessionId, SurfaceKey};
 
 #[cfg(target_os = "android")]
 fn init_logging() {
@@ -135,6 +136,13 @@ fn state(handle: jlong) -> Result<Arc<NativeState>, String> {
         .filter(|entry| entry.handle == handle)
         .map(|entry| entry.state.clone())
         .ok_or_else(|| "native handle is closed".to_string())
+}
+
+fn surface(state: &NativeState, key: SurfaceKey) -> Result<Arc<Mutex<AndroidSurface>>, String> {
+    state
+        .actor
+        .surface(key)
+        .ok_or_else(|| EngineError::UnknownSurface(key).to_string())
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -271,16 +279,21 @@ pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeAttachSurface(
     handle: jlong,
     session: jlong,
     window: jint,
-    surface: JObject<'_>,
+    java_surface: JObject<'_>,
     width: jint,
     height: jint,
 ) -> jboolean {
     jni_guard!(env, env, jboolean, {
         let key = key(session, window)?;
         let state = state(handle)?;
+        let view = surface(&state, key)?;
         let width = u32::try_from(width).map_err(|_| "invalid width".to_string())?;
         let height = u32::try_from(height).map_err(|_| "invalid height".to_string())?;
-        lock(&state.gpu).attach(env, key, &surface, width, height)?;
+        lock(&state.gpu).attach(env, key, &java_surface, width, height)?;
+        lock(&view).set_view_size(Size {
+            width: width.max(1),
+            height: height.max(1),
+        });
         Ok(jb(true))
     })
 }
@@ -300,7 +313,32 @@ pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeResizeSurface(
         let width = u32::try_from(width).map_err(|_| "invalid width".to_string())?;
         let height = u32::try_from(height).map_err(|_| "invalid height".to_string())?;
         let state = state(handle)?;
+        let view = surface(&state, key)?;
         lock(&state.gpu).resize(key, width, height)?;
+        lock(&view).set_view_size(Size {
+            width: width.max(1),
+            height: height.max(1),
+        });
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeSetViewport(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    session: jlong,
+    window: jint,
+    zoom: jfloat,
+    pan_x: jfloat,
+    pan_y: jfloat,
+) {
+    jni_guard!(env, env, (), {
+        let key = key(session, window)?;
+        let state = state(handle)?;
+        let view = surface(&state, key)?;
+        lock(&view).set_viewport(Viewport { zoom, pan_x, pan_y });
         Ok(())
     })
 }
@@ -373,13 +411,10 @@ pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeWaitDirty(
     handle: jlong,
     session: jlong,
     window: jint,
-    seen_version: jlong,
     timeout_ms: jint,
 ) -> jlong {
     jni_guard!(env, env, jlong, {
         let key = key(session, window)?;
-        let seen_version =
-            u64::try_from(seen_version).map_err(|_| "invalid frame version".to_string())?;
         let timeout_ms = u64::try_from(timeout_ms).unwrap_or(0).min(300_000);
         let signal = state(handle)?.actor.surface(key).map(|surface| {
             surface
@@ -387,8 +422,8 @@ pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeWaitDirty(
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .signal()
         });
-        let version = signal
-            .and_then(|signal| signal.wait_dirty(seen_version, Duration::from_millis(timeout_ms)));
+        let version =
+            signal.and_then(|signal| signal.wait_dirty(Duration::from_millis(timeout_ms)));
         Ok(version.map_or(0, |version| version as jlong))
     })
 }
@@ -430,7 +465,7 @@ pub extern "system" fn Java_org_waypane_app_NativeBridge_nativeTouch(
         let command = match action {
             0 => ActorCommand::TouchDown(key, pointer, f64::from(x), f64::from(y)),
             1 => ActorCommand::TouchMotion(key, pointer, f64::from(x), f64::from(y)),
-            2 => ActorCommand::TouchUp(key, pointer),
+            2 => ActorCommand::TouchUp(key, pointer, f64::from(x), f64::from(y)),
             _ => return Err("unknown touch action".to_string()),
         };
         Ok(jb(state(handle)?.actor.send(command)))
