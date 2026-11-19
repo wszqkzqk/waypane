@@ -82,6 +82,14 @@ class RemoteSurfaceView(
                     reportRenderError("Failed to resize Android GPU surface", error)
                 }
             }
+            if (attached) requestRenderIfDirty()
+        }
+    }
+
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        super.onWindowVisibilityChanged(visibility)
+        if (visibility == View.VISIBLE && attached) {
+            renderHandler.post { requestRenderIfDirty() }
         }
     }
 
@@ -160,17 +168,37 @@ class RemoteSurfaceView(
         }
     }
 
+    private fun requestRenderIfDirty() {
+        if (!attached) return
+        val handle = handle()
+        if (handle == 0L) return
+        val dirty = runCatching {
+            NativeBridge.nativeIsDirty(handle, key.session, key.window)
+        }.onFailure { error ->
+            reportRenderError("Failed to inspect Wayland surface state", error)
+        }.getOrNull() ?: return
+        if (dirty) Choreographer.getInstance().postFrameCallback(this)
+    }
+
     override fun doFrame(frameTimeNanos: Long) {
         if (!attached) return
         val handle = handle()
         if (handle == 0L) return
-        runCatching {
+        val outcome = runCatching {
             NativeBridge.nativeRender(handle, key.session, key.window)
         }.onFailure { error ->
             reportRenderError("Failed to render Android GPU surface", error)
             return
+        }.getOrNull() ?: return
+        when (outcome) {
+            RENDER_IDLE, RENDER_PRESENTED -> scheduleDirtyWait()
+            RENDER_RETRY -> Choreographer.getInstance().postFrameCallback(this)
+            RENDER_OCCLUDED -> Unit
+            else -> reportRenderError(
+                "Unknown native render outcome $outcome",
+                IllegalStateException("nativeRender returned $outcome"),
+            )
         }
-        scheduleDirtyWait()
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -382,6 +410,10 @@ class RemoteSurfaceView(
 
     companion object {
         private const val TAG = "WaypaneRender"
+        private const val RENDER_IDLE = 0
+        private const val RENDER_PRESENTED = 1
+        private const val RENDER_RETRY = 2
+        private const val RENDER_OCCLUDED = 3
         private const val TOUCH_DOWN = 0
         private const val TOUCH_MOTION = 1
         private const val TOUCH_UP = 2
