@@ -31,7 +31,7 @@ mod tests {
     use bytes::Bytes;
 
     use super::*;
-    use crate::header::{server_header, HEADER_SIZE};
+    use crate::header::{server_header, server_header_at, HEADER_SIZE};
 
     fn get_registry() -> Bytes {
         Bytes::from_static(&[1, 0, 0, 0, 1, 0, 12, 0, 2, 0, 0, 0])
@@ -90,6 +90,41 @@ mod tests {
         assert_eq!(messages[0].object_id(), 1);
         assert_eq!(messages[0].opcode(), 1);
         assert_eq!(messages[0].payload(), &[2, 0, 0, 0]);
+    }
+
+    #[test]
+    fn handles_waypipe_c_ack_nblocks_by_negotiated_protocol_version() {
+        let header = server_header_at(MIN_PROTOCOL_VERSION, Compression::None, true);
+        assert_eq!(u32::from_le_bytes(header[..4].try_into().unwrap()) >> 16, 1);
+        let mut client = Client::default();
+        let mut input = header.to_vec();
+        push_frame(&mut input, MessageType::AckNblocks, &7u32.to_le_bytes());
+        push_frame(&mut input, MessageType::Protocol, &get_registry());
+        let batch = client.receive(&input).unwrap();
+        assert!(batch.outgoing.is_empty());
+        assert_eq!(
+            batch.events[0],
+            ClientEvent::Negotiated {
+                remote_version: MIN_PROTOCOL_VERSION,
+                version: MIN_PROTOCOL_VERSION,
+            }
+        );
+        assert!(matches!(batch.events[1], ClientEvent::Protocol(_)));
+        assert_eq!(batch.events.len(), 2);
+
+        let mut client = Client::default();
+        let mut malformed = header.to_vec();
+        push_frame(&mut malformed, MessageType::AckNblocks, &[1, 2, 3]);
+        let error = client.receive(&malformed).unwrap_err().to_string();
+        assert!(error.contains("expected 4 at protocol 0x10"), "{error}");
+
+        let mut client = negotiated_client();
+        let error = client
+            .receive(&encode_frame(MessageType::AckNblocks, &7u32.to_le_bytes()).unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("negotiated protocol 0x11"), "{error}");
+        assert!(error.contains("server advertised 0x11"), "{error}");
     }
 
     #[test]

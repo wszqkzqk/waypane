@@ -84,7 +84,15 @@ impl ConnectionHeader {
 
 #[cfg(test)]
 pub(crate) fn server_header(compression: Compression, no_dmabuf: bool) -> [u8; HEADER_SIZE] {
-    let version = WAYPIPE_PROTOCOL_VERSION;
+    server_header_at(WAYPIPE_PROTOCOL_VERSION, compression, no_dmabuf)
+}
+
+#[cfg(test)]
+pub(crate) fn server_header_at(
+    version: u32,
+    compression: Compression,
+    no_dmabuf: bool,
+) -> [u8; HEADER_SIZE] {
     let mut lead = ((version >> 4) << 16) | ((version & 0xf) << 3) | CONN_FIXED_BIT | CONN_NO_VIDEO;
     lead |= match compression {
         Compression::None => CONN_NO_COMPRESSION,

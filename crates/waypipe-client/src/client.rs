@@ -425,10 +425,30 @@ impl Client {
                     "waypipe server sent a Version frame".to_string(),
                 ));
             }
-            MessageType::AckNblocks | MessageType::Restart => {
+            MessageType::AckNblocks => {
+                let header = self.header().ok_or_else(|| {
+                    Error::InvalidFrame("AckNblocks received before connection header".to_string())
+                })?;
+                if header.version > MIN_PROTOCOL_VERSION {
+                    return Err(Error::InvalidFrame(format!(
+                        "AckNblocks frame is disabled at negotiated protocol {:#x} (server advertised {:#x})",
+                        header.version, header.remote_version
+                    )));
+                }
+                if payload.len() != 4 {
+                    return Err(Error::InvalidFrame(format!(
+                        "AckNblocks payload has {} bytes, expected 4 at protocol {:#x}",
+                        payload.len(),
+                        header.version
+                    )));
+                }
+            }
+            MessageType::Restart => {
+                let version = self
+                    .header()
+                    .map_or(MIN_PROTOCOL_VERSION, |header| header.version);
                 return Err(Error::InvalidFrame(format!(
-                    "reconnection frame {:?} is disabled at protocol 0x11",
-                    frame.kind
+                    "Restart reconnection frame is not supported at negotiated protocol {version:#x}"
                 )));
             }
             other => return Err(Error::UnsupportedFrame(other)),
