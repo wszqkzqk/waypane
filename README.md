@@ -188,8 +188,10 @@ state (`crates/waypane-core`), SSH transport (`crates/waypane-transport`), softw
 native hosts (`apps/waypane-desktop`, `apps/android`). Upstream Waypipe 0.11.3 is vendored as the
 protocol reference and interoperability-test peer.
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for protocol details, compositor invariants, host
-lifecycle, security behavior, and the upstream integration-test commands.
+Start with the crate-level Rust docs and the unit tests beside each crate. The upstream Waypipe
+interoperability suites live under `crates/*/tests`, and
+[`.github/workflows/build.yml`](.github/workflows/build.yml) is the authoritative definition of the
+platform builds and the commands used to run them.
 
 Local checks:
 
