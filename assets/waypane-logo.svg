@@ -3,22 +3,22 @@
   <desc id="waypane-logo-desc">A flowing W linking a Wayland source window to a native receiver window.</desc>
   <defs>
     <linearGradient id="pane" x1="72" y1="72" x2="440" y2="440" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#22D3EE"/>
-      <stop offset="0.48" stop-color="#3B82F6"/>
-      <stop offset="1" stop-color="#8B5CF6"/>
+      <stop offset="0" stop-color="#FCA55C"/>
+      <stop offset="0.46" stop-color="#F0547A"/>
+      <stop offset="1" stop-color="#7C3AED"/>
     </linearGradient>
     <linearGradient id="screen" x1="256" y1="136" x2="256" y2="408" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#0F172A" stop-opacity="0.22"/>
-      <stop offset="1" stop-color="#0F172A" stop-opacity="0.06"/>
+      <stop offset="0" stop-color="#1F0B1E" stop-opacity="0.24"/>
+      <stop offset="1" stop-color="#1F0B1E" stop-opacity="0.08"/>
     </linearGradient>
     <linearGradient id="stream" x1="132" y1="196" x2="380" y2="326" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#FFFFFF"/>
-      <stop offset="0.55" stop-color="#F0F9FF"/>
-      <stop offset="1" stop-color="#EDE9FE"/>
+      <stop offset="0.55" stop-color="#FFF1F2"/>
+      <stop offset="1" stop-color="#F5F3FF"/>
     </linearGradient>
     <linearGradient id="inset" x1="302" y1="252" x2="450" y2="408" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#1E293B"/>
-      <stop offset="1" stop-color="#020617"/>
+      <stop offset="0" stop-color="#2A1230"/>
+      <stop offset="1" stop-color="#100814"/>
     </linearGradient>
     <clipPath id="pane-clip">
       <rect x="72" y="72" width="368" height="336" rx="56"/>
@@ -39,17 +39,17 @@
   </g>
 
   <g>
-    <rect x="296" y="214" width="168" height="200" rx="28" fill="#0F172A" fill-opacity="0.2"/>
-    <rect x="292" y="208" width="168" height="200" rx="28" fill="#F8FAFC"/>
+    <rect x="296" y="214" width="168" height="200" rx="28" fill="#1F0B1E" fill-opacity="0.24"/>
+    <rect x="292" y="208" width="168" height="200" rx="28" fill="#FFF7F5"/>
     <g clip-path="url(#receiver-clip)">
       <rect x="302" y="218" width="148" height="190" fill="url(#inset)"/>
-      <path d="M322 218H430C441.046 218 450 226.954 450 238V252H302V238C302 226.954 310.954 218 322 218Z" fill="#E2E8F0"/>
+      <path d="M322 218H430C441.046 218 450 226.954 450 238V252H302V238C302 226.954 310.954 218 322 218Z" fill="#F5D6D8"/>
     </g>
-    <circle cx="322" cy="235" r="5" fill="#3B82F6"/>
-    <circle cx="340" cy="235" r="5" fill="#94A3B8"/>
-    <circle cx="358" cy="235" r="5" fill="#CBD5E1"/>
-    <rect x="322" y="268" width="100" height="14" rx="7" fill="#60A5FA"/>
-    <rect x="322" y="300" width="64" height="14" rx="7" fill="#67E8F9" fill-opacity="0.9"/>
-    <rect x="322" y="332" width="82" height="14" rx="7" fill="#A78BFA" fill-opacity="0.92"/>
+    <circle cx="322" cy="235" r="5" fill="#F43F5E"/>
+    <circle cx="340" cy="235" r="5" fill="#FB7185"/>
+    <circle cx="358" cy="235" r="5" fill="#FDA4AF"/>
+    <rect x="322" y="268" width="100" height="14" rx="7" fill="#FBBF24"/>
+    <rect x="322" y="300" width="64" height="14" rx="7" fill="#FB7185" fill-opacity="0.92"/>
+    <rect x="322" y="332" width="82" height="14" rx="7" fill="#C4B5FD" fill-opacity="0.94"/>
   </g>
 </svg>
