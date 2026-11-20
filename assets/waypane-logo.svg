@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="waypane-logo-title waypane-logo-desc">
+  <title id="waypane-logo-title">Waypane</title>
+  <desc id="waypane-logo-desc">A flowing W inside a Wayland window pane streaming into a phone pane.</desc>
+  <defs>
+    <linearGradient id="pane" x1="72" y1="72" x2="440" y2="440" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#22D3EE"/>
+      <stop offset="0.48" stop-color="#3B82F6"/>
+      <stop offset="1" stop-color="#8B5CF6"/>
+    </linearGradient>
+    <linearGradient id="screen" x1="256" y1="136" x2="256" y2="408" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0F172A" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#0F172A" stop-opacity="0.06"/>
+    </linearGradient>
+    <linearGradient id="stream" x1="132" y1="196" x2="380" y2="326" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.55" stop-color="#F0F9FF"/>
+      <stop offset="1" stop-color="#EDE9FE"/>
+    </linearGradient>
+    <linearGradient id="phone" x1="312" y1="228" x2="432" y2="428" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1E293B"/>
+      <stop offset="1" stop-color="#020617"/>
+    </linearGradient>
+    <clipPath id="pane-clip">
+      <rect x="72" y="72" width="368" height="336" rx="56"/>
+    </clipPath>
+  </defs>
+
+  <g>
+    <rect x="72" y="72" width="368" height="336" rx="56" fill="url(#pane)"/>
+    <path d="M128 72H384C414.928 72 440 97.072 440 128V136H72V128C72 97.072 97.072 72 128 72Z" fill="#FFFFFF" fill-opacity="0.14"/>
+    <rect x="72" y="136" width="368" height="272" fill="url(#screen)" clip-path="url(#pane-clip)"/>
+    <circle cx="116" cy="104" r="9" fill="#FFFFFF" fill-opacity="0.95"/>
+    <circle cx="148" cy="104" r="9" fill="#FFFFFF" fill-opacity="0.65"/>
+    <circle cx="180" cy="104" r="9" fill="#FFFFFF" fill-opacity="0.4"/>
+    <path d="M132 196C152 268 168 326 198 326C228 326 240 232 256 232C272 232 284 326 314 326C344 326 360 268 380 196" fill="none" stroke="url(#stream)" stroke-width="26" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <g>
+    <rect x="304" y="224" width="144" height="224" rx="38" fill="#0F172A" fill-opacity="0.2"/>
+    <rect x="300" y="216" width="144" height="224" rx="38" fill="#F8FAFC"/>
+    <rect x="312" y="228" width="120" height="200" rx="28" fill="url(#phone)"/>
+    <rect x="353" y="241" width="38" height="8" rx="4" fill="#475569"/>
+    <rect x="332" y="276" width="80" height="14" rx="7" fill="url(#pane)"/>
+    <rect x="332" y="306" width="56" height="14" rx="7" fill="#67E8F9" fill-opacity="0.88"/>
+    <rect x="332" y="336" width="68" height="14" rx="7" fill="#A78BFA" fill-opacity="0.9"/>
+    <rect x="353" y="405" width="38" height="7" rx="3.5" fill="#64748B"/>
+  </g>
+</svg>

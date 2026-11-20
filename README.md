@@ -1,4 +1,8 @@
-# Waypane
+<div align="center">
+  <img src="assets/waypane-logo.svg" alt="Waypane logo" width="144" height="144">
+
+  # Waypane
+</div>
 
 Waypane is a native Wayland application receiver for macOS, Windows, and Android. It
 displays Wayland applications running on local Termux or remote Linux hosts as native
