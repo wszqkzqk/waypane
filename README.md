@@ -4,86 +4,54 @@
   # Waypane
 </div>
 
-Waypane is **window-level Wayland forwarding over SSH** for **Android, macOS, and Windows**. You
-pick the Linux application to launch, and its Wayland windows appear on your device instead of
-sending a video stream of somebody's entire desktop.
+Waypane is **window-level Wayland forwarding over SSH** for **Android, macOS, and Windows**. Pick a
+Linux application to launch, and its windows appear on your device instead of a video stream of an
+entire desktop.
 
-The application host needs only `sshd` and the stock `waypipe` binary. Waypane starts
-`waypipe server -- <command>` automatically; there is no Waypane daemon to install, and the host
-does not need a monitor, running compositor, desktop environment, GPU, VNC/RDP server, or root
-access at runtime.
+The host needs only `sshd` and stock `waypipe`. Waypane starts `waypipe server -- <command>` for
+you; no Waypane daemon, monitor, running compositor, desktop environment, GPU, or VNC/RDP server is
+required on the host.
 
-> **Status:** early development. The SSH/Waypipe/SHM path and the Android app have been exercised
-> on-device against upstream Waypipe 0.11.3. macOS and Windows are built and tested in CI, but
-> interactive desktop coverage is still limited, especially on physical Windows machines.
+> **Status:** early development. Android is tested on-device with upstream Waypipe 0.11.3. macOS and
+> Windows are built and tested in CI, with limited interactive desktop coverage, especially on
+> physical Windows machines.
 
-## What you can do with it
+## Why Waypane
 
-### Run individual Linux apps from macOS, Windows, or Android
+### Run Linux apps on macOS, Windows, or Android
 
-Point Waypane at any Linux machine you can SSH into—a headless server, cloud VM, container host, or
-desktop you left elsewhere—and launch the application you need with a command such as `foot`,
-`nautilus`, or `gtk4-demo`.
+Connect to any headless server, VM, or Linux machine and start an application such as `foot`,
+`nautilus`, or `gtk4-demo`. CPU shared-memory rendering (`--no-gpu`) works without an X server,
+display manager, or GPU. Windows, popups, menus, cursors, integer display scaling, keyboard/pointer
+input, and text clipboard all travel through one SSH connection. Authentication supports passwords
+and (encrypted) private keys, with SHA-256 host-key verification.
 
-- **Truly headless hosts work:** applications can render with the host CPU through shared memory
-  (`--no-gpu`), so there is nothing to configure for an X server, display manager, or GPU.
-- **It starts what you ask for:** each session runs an application command instead of attaching to
-  a preconfigured desktop session. Multiple windows, popups, menus, cursors, native integer display
-  scaling on every platform, keyboard/pointer input, and text clipboard work through the same
-  connection.
-- **SSH stays the control and security boundary:** password or public-key authentication (including
-  encrypted keys), SHA-256 host-key confirmation, and explicit errors when the command or `waypipe`
-  is missing.
+### Use Waypane as a local display for Android Termux
 
-### Give Android Termux a local Wayland desktop—or just one GUI app
+Over local SSH, Waypane turns Termux into a Wayland environment without a separate VNC viewer or X
+server:
 
-Waypane doubles as a native display for Termux over local SSH (`127.0.0.1:8022`), without pairing
-Termux with a separate VNC viewer or X server.
+- Start `weston` for a full local desktop shell and launch more apps from its terminal.
+- Start `foot` or another Wayland app directly when you only need a terminal or one GUI tool.
 
-- **Full local desktop shell:** set the application command to `weston`. Weston runs headless inside
-  Termux and appears in Waypane; open its terminal and start more Wayland apps inside that desktop.
-  Larger desktop environments still require their usual D-Bus and session services on the host.
-- **Single app, no desktop:** set the command to `foot` or another installed Wayland application.
-  The app gets the phone's usable display area directly, which is useful when all you want is a
-  terminal or one graphical tool.
-- **Termux paths are handled automatically:** Waypane discovers `$TMPDIR` over SSH, sets
-  `XDG_RUNTIME_DIR`, and creates the Waypipe socket there, so `/tmp` is not required.
+Waypane discovers `$TMPDIR` automatically and sets `XDG_RUNTIME_DIR`, so `/tmp` is not needed.
+Larger desktop environments still require their usual D-Bus and session services on the host.
 
-### Use remote Linux apps comfortably on a phone
+### Use desktop Linux apps comfortably on a phone
 
-Android can connect to remote Linux hosts with the same per-window model, adapted to a small touch
-screen instead of presenting a shrunken desktop image.
+The same per-window model works from Android to remote Linux. Density-aware native scaling makes
+text and controls readable, Auto-resize fits apps to the visible area, and touch, soft-keyboard,
+pinch-zoom, and landscape layouts replace the experience of viewing a shrunken desktop. A foreground
+service keeps the session and windows alive when you leave the app with Home or Recents.
 
-- **Readable by default:** density-aware native Wayland scaling (Auto or 1x–4x) makes remote text and
-  controls render larger, while Auto-resize asks apps to fit the visible area.
-- **Touch-first input:** tap to click, drag to move or select, long-press for right click, two-finger
-  scroll, pinch zoom and pan, or native `wl_touch`. Keys opens the soft keyboard; the view pans above
-  it without distorting or resizing the remote window.
-- **Made for switching tasks:** landscape uses a compact side rail and the full usable height, while
-  a foreground service keeps the SSH session and remote windows alive when you leave the app with
-  Home or Recents.
-
-### How this differs from full-desktop remoting
-
-| | VNC/RDP-style desktop remoting | Waypane |
-| --- | --- | --- |
-| Host setup | A desktop session plus a remote-desktop service | `sshd` and `waypipe` |
-| What is forwarded | An entire preconfigured desktop framebuffer | The windows of the application command you choose |
-| Session startup | Attach to an already configured session | Start `waypipe server -- <command>` on demand |
-| Headless use | Typically needs a virtual display or desktop stack | Shared-memory rendering on a host without a display or GPU |
-
-Waypane targets interactive desktop GUI applications over CPU-rendered shared memory, not GPU
+VNC/RDP forwards a preconfigured desktop; Waypane starts just the app you name and forwards its
+windows. It targets interactive GUI applications through CPU-rendered shared memory, not GPU
 pass-through or game streaming.
 
 ## Quick start
 
-### 1. Prepare the host
-
-Install `waypipe` and `sshd` on the Linux or Termux environment that will run the application.
-OpenSSH must allow remote Unix-socket forwarding (`AllowStreamLocalForwarding yes`, the default on
-standard OpenSSH configurations). No manual `waypipe server` command is needed.
-
-For local Termux on Android:
+Install `waypipe` and `sshd` on the host and ensure OpenSSH allows remote Unix-socket forwarding
+(`AllowStreamLocalForwarding yes`, the OpenSSH default). On Termux:
 
 ```sh
 pkg install openssh waypipe weston
@@ -91,166 +59,109 @@ sshd
 whoami
 ```
 
-Use `passwd` for password authentication, or add your public key to
-`~/.ssh/authorized_keys`. Termux's SSH server listens on port `8022` by default.
+Use `passwd` for password authentication or add a public key to `~/.ssh/authorized_keys`.
 
-### 2. Connect from Android
+### Android
 
-1. Open the **Waypane** app.
-2. For local Termux, keep **Host** `127.0.0.1` and **Port** `8022`; for remote Linux, enter the
-   SSH host and its port (usually `22`).
-3. Set **SSH user** to the output of `whoami` on the host.
-4. Choose **Private key** and import a key whose public key is in `~/.ssh/authorized_keys`, or choose
-   **Password**. Imported keys are stored with owner-only permissions in app-private storage.
-5. Set **Remote application command**, for example `weston`, `foot`, or `env LANG=C gtk4-demo`.
-   Enter only the application and its arguments; Waypane manages Waypipe's own options.
-6. Tap **Connect**. On first contact, compare the displayed SHA-256 host-key fingerprint with the
-   host, then choose **Trust and save**. A changed key always requires explicit confirmation.
+- **Termux:** connect to `127.0.0.1:8022`; **remote Linux:** enter your SSH host and port (`22`).
+- Set the user from `whoami`, import a private key or enter a password, and set the application
+  command (`weston` for a desktop, or `foot`, `env LANG=C gtk4-demo`, etc.). Arguments are allowed,
+  but Waypipe options are managed by Waypane.
+- Tap **Connect**, compare the SHA-256 host-key fingerprint, and choose **Trust and save**. Changed
+  host keys always require explicit confirmation. Imported keys stay owner-only in app storage.
 
-**Auto-resize** and **Wayland display scale: Auto** are enabled by default. Auto scale selects
-`ceil(display density / 2)` clamped to 1x–4x (for example 2x on a 480dpi phone); 1x–4x can also be
-selected manually from Setup or **Menu**.
+Auto-resize and Auto display scale (`ceil(display density / 2)`, clamped to 1x–4x) are enabled by
+default. Setup and **Menu** offer 1x–4x manually, along with compression (`lz4`/`zstd`/`none`),
+Direct touch, and an optional absolute remote-socket path override.
 
-### 3. Connect from macOS or Windows
+### macOS and Windows
 
-Build the desktop client as described in [Building](#building), then run:
+[Build the desktop client](#building), or download a CI artifact, then run:
 
 ```sh
 waypane-desktop --ssh user@linux-host:22 --identity ~/.ssh/id_ed25519 \
   --accept-new-host-key -- foot
 ```
 
-Password and key passphrases can be supplied through environment variables instead of the command
-line:
-
-```sh
-export WAYPANE_PASSWORD='...'
-waypane-desktop --ssh user@linux-host --password-env WAYPANE_PASSWORD -- gtk4-demo
-```
-
-For an encrypted private key, add `--identity ~/.ssh/id_ed25519 --passphrase-env
-WAYPANE_PASSPHRASE` instead of `--password-env`.
-
-Host keys are checked against `~/.ssh/known_hosts` by default. `--accept-new-host-key` saves an
-unknown host key but still rejects a key that changes later; verify fingerprints out-of-band when
-using it. Override the file with `--known-hosts PATH` when necessary.
-
-## Common options
-
-- **Remote socket directory:** Waypane discovers a writable directory in `TMPDIR`, then
-  `XDG_RUNTIME_DIR`, then `/tmp`, so Termux works without a `/tmp` directory. If automatic discovery
-  is unsuitable, set **Remote socket path** in Android or pass `--remote-socket /absolute/path.sock`
-  on desktop. The path must be absolute and at most 100 bytes.
-- **Compression:** `lz4` (default) favors low CPU and latency on loopback and fast networks; `zstd`
-  saves more bandwidth on slow or metered links; `none` minimizes CPU on local transports. Use
-  `--compression none|lz4|zstd` on desktop or the matching chips in Android Setup.
-- **Waypipe binary:** desktop uses `waypipe` from `PATH` unless `--waypipe-bin PATH` is supplied.
-- **Window sizing:** Android Auto-resize asks applications to match the visible view while the GPU
-  still fits whatever buffer size the client actually commits. Disable it to preserve the original
-  remote geometry; black letterbox areas are never treated as remote input.
-
-A remote message such as `could not load cursor 'dnd-none'` comes from the Xcursor theme on the
-host, not from Waypipe. Install or configure a cursor theme on the host if custom cursor shapes are
-needed; it does not affect desktop frames.
+Use `--password-env WAYPANE_PASSWORD` for password authentication and `--passphrase-env
+WAYPANE_PASSPHRASE` for an encrypted key. Host keys are read from `~/.ssh/known_hosts` unless
+`--known-hosts PATH` is given; `--accept-new-host-key` saves unknown keys but never accepts changed
+keys. See `waypane-desktop --help` for compression, remote-socket, custom-waypipe, and local-socket
+options. `lz4` is the default; use `zstd` on slow links.
 
 ## Android controls
 
 | Gesture | Default action |
 | --- | --- |
-| Tap | Left click at the touched position |
-| One-finger drag | Left-button drag starting at the original position |
+| Tap | Left click |
+| One-finger drag | Left-button drag |
 | Long-press | Right click |
-| Two-finger drag at 1x fit | Smooth scrolling |
-| Pinch, then drag | 1x–8x presentation zoom and pan |
-| Quick two-finger tap | Toggle 2.5x focus at the fingers |
+| Two-finger drag at fit | Scroll |
+| Pinch and drag | 1x–8x zoom and pan |
+| Quick two-finger tap | Toggle 2.5x focus; **Fit** resets |
 
-- **Direct touch input** in **Menu** sends native `wl_touch` events instead of pointer emulation.
-- **Keys / Keyboard** opens the soft keyboard. The remote view translates upward to stay above the
-  keyboard without reallocating its GPU surface or resizing the remote window. Touching the view
-  never opens the keyboard by itself.
-- **Fit** resets pinch zoom and pan. **Menu** provides display scale, Auto-resize, Direct touch,
-  fullscreen, and **Close remote window**.
-- Portrait uses a top bar; landscape uses a narrow end-side rail and hides the system bars so the
-  remote window gets the full usable height. In fullscreen, a translucent Menu remains at the top
-  right and Back first leaves fullscreen.
-- **Back** asks for confirmation before disconnecting. Leaving with Home or Recents keeps the SSH
-  session and windows alive through a foreground service with **Open** and **Disconnect**
-  notification actions. If Android reclaims the process, the remote session must be reconnected.
+**Direct touch** in **Menu** sends native `wl_touch` instead of pointer emulation. **Keys** opens the
+soft keyboard and pans the view above it without resizing the remote window; touching the view never
+opens the keyboard. **Menu** also provides fullscreen, Fit, and Close remote window.
+
+Landscape uses a compact side rail and hides the system bars for full-height display. Back asks for
+confirmation before disconnecting; the session notification also offers **Open** and **Disconnect**.
+If Android reclaims the process, reconnect the session.
 
 ## Downloads
 
-Every CI run on `main` uploads artifacts to the
-[Actions workflow](https://github.com/wszqkzqk/waypane/actions/workflows/build.yml) for
-14 days:
+Recent [CI runs](https://github.com/wszqkzqk/waypane/actions/workflows/build.yml) on `main` upload
+these debug artifacts:
 
-- `waypane-android-debug-arm64`: Android arm64 APK (`minSdk 26`). Consecutive non-PR debug builds
-  share a CI signing key, so `adb install -r app-debug.apk` updates in place and keeps app data.
-- `waypane-desktop-macOS-ARM64`: macOS Apple Silicon desktop binary.
-- `waypane-desktop-Windows-X64`: x86-64 Windows desktop binary.
-
-These are CI debug artifacts, not signed releases.
+- `waypane-android-debug-arm64`: arm64 APK (`minSdk 26`), installable in place with
+  `adb install -r app-debug.apk`
+- `waypane-desktop-macOS-ARM64`
+- `waypane-desktop-Windows-X64`
 
 ## Building
 
-The Rust workspace requires Rust 1.90 or later; CI tracks the latest stable toolchain.
-
-Desktop:
+Rust 1.90 or later is required:
 
 ```sh
 cargo build --release --locked -p waypane-desktop
 # target/release/waypane-desktop (waypane-desktop.exe on Windows)
 ```
 
-Android builds require an Android SDK/NDK, JDK, Gradle, and `cargo-ndk`:
+Android builds additionally need an Android SDK/NDK, JDK, Gradle, `cargo-ndk`, the
+`aarch64-linux-android` Rust target, and `ANDROID_NDK_HOME`:
 
 ```sh
-rustup target add aarch64-linux-android
-cargo install cargo-ndk --locked
-export ANDROID_NDK_HOME=/path/to/ndk
 cd apps/android
 gradle :app:assembleDebug
 # app/build/outputs/apk/debug/app-debug.apk
 ```
 
-CI builds Windows, macOS, upstream Waypipe interoperability, and the Android APK on hosted runners,
-so local development does not require those SDK installations.
+CI runs all platform builds and the upstream Waypipe interoperability tests on hosted runners; see
+[`.github/workflows/build.yml`](.github/workflows/build.yml) for the current commands and toolchain
+setup.
 
-## Current limitations
+## Limitations
 
-- Rendering uses `wl_shm` (`--no-gpu`). DMABUF/GPU passthrough, hardware video codecs, and audio
-  forwarding are not supported.
-- Clipboard synchronization is text-only. Drag-and-drop is not implemented.
-- Native scaling is integer-only; `wp_fractional_scale_v1` and `wp_viewporter` are not advertised.
-  Fractional desktop ratios are handled by host presentation, and Android also supports pinch zoom.
-- Desktop keeps the host OS cursor and does not yet integrate native OS IME/preedit. Android
-  composites remote cursor images and supports text-input-v3 through the soft keyboard.
-- SSH agent authentication, Xwayland shell integration, and automatic reconnection after the client
-  process or network is lost are not implemented.
+- `wl_shm` only: no DMABUF/GPU passthrough, hardware video codecs, or audio forwarding.
+- Text clipboard only; drag-and-drop is not implemented. Native scaling is integer-only
+  (`wp_fractional_scale_v1` and `wp_viewporter` are not advertised).
+- Desktop keeps the host OS cursor and has no host IME/preedit integration yet. SSH agent
+  authentication, Xwayland shell integration, and automatic reconnection are not implemented.
 
 ## Development
 
-The workspace separates the Waypipe wire protocol (`crates/waypipe-client`), Wayland compositor
-state (`crates/waypane-core`), SSH transport (`crates/waypane-transport`), software/GPU composition
-(`crates/waypane-render`), Android engine and JNI bindings (`crates/waypane-android`), and the two
-native hosts (`apps/waypane-desktop`, `apps/android`). Upstream Waypipe 0.11.3 is vendored as the
-protocol reference and interoperability-test peer.
-
-Start with the crate-level Rust docs and the unit tests beside each crate. The upstream Waypipe
-interoperability suites live under `crates/*/tests`, and
-[`.github/workflows/build.yml`](.github/workflows/build.yml) is the authoritative definition of the
-platform builds and the commands used to run them.
-
-Local checks:
+Reusable code lives in `crates/` (`waypipe-client`, `waypane-core`, `waypane-transport`,
+`waypane-render`, `waypane-android`), and native hosts in `apps/`. Upstream Waypipe 0.11.3 in
+`vendor/waypipe` is the protocol reference and interoperability-test peer.
 
 ```sh
 cargo fmt --all --check
 cargo test --workspace --locked
-cargo test -p waypane-android --features jni-check --locked
 cargo clippy --workspace --all-targets --features jni-check --locked -- -D warnings
 ```
 
-Dependencies track current stable releases with grouped Dependabot updates, while `Cargo.lock`
-stays committed for reproducible builds.
+Dependencies follow current stable releases via grouped Dependabot updates; `Cargo.lock` is
+committed for reproducible builds.
 
 ## License
 
