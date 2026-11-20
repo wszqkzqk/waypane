@@ -3622,6 +3622,7 @@ dependencies = [
  "bytes",
  "clap",
  "env_logger",
+ "libc",
  "log",
  "thiserror 2.0.21",
  "tokio",

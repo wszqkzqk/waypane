@@ -5,7 +5,9 @@ mod ssh;
 
 pub use error::{Error, Result};
 pub use pump::pump;
-pub use remote::{shell_quote, RemoteSocket, RemoteWaypipe, MAX_REMOTE_SOCKET_BYTES};
+pub use remote::{
+    shell_quote, RemoteSocket, RemoteWaypipe, MAX_REMOTE_SOCKET_BYTES, REMOTE_DIRECTORY_COMMAND,
+};
 #[cfg(unix)]
 pub use ssh::LocalListener;
 pub use ssh::{

@@ -89,6 +89,22 @@ WAYPANE_PASSPHRASE` for an encrypted key. Host keys are read from `~/.ssh/known_
 keys. See `waypane-desktop --help` for compression, remote-socket, custom-waypipe, and local-socket
 options. `lz4` is the default; use `zstd` on slow links.
 
+On macOS and other Unix hosts, omitting `-- <COMMAND>` starts an interactive system OpenSSH shell
+instead of the built-in `russh` launcher:
+
+```sh
+waypane-desktop --ssh work-server
+```
+
+This form uses `~/.ssh/config`, host aliases, ProxyJump, ssh-agent, OpenSSH's host-key prompts, and a
+PTY. Waypipe starts your login shell on the remote host; run `nautilus`, `gtk4-demo`, or another
+`foot` from that shell and each GUI client is forwarded as a separate Waypipe session. Explicit
+`--port`/`:port`, `--identity`, `--known-hosts`, and `--accept-new-host-key` are mapped to OpenSSH
+options, while `--password-env` and `--passphrase-env` are available only in explicit-command mode.
+Rust diagnostics are written to a separate log file instead of corrupting the terminal UI; the file
+is kept and printed only when errors occur. Windows currently requires `-- <COMMAND>` because
+interactive mode uses a local Unix-socket listener.
+
 ## Android controls
 
 | Gesture | Default action |
@@ -145,8 +161,9 @@ setup.
 - `wl_shm` only: no DMABUF/GPU passthrough, hardware video codecs, or audio forwarding.
 - Text clipboard only; drag-and-drop is not implemented. Native scaling is integer-only
   (`wp_fractional_scale_v1` and `wp_viewporter` are not advertised).
-- Desktop keeps the host OS cursor and has no host IME/preedit integration yet. SSH agent
-  authentication, Xwayland shell integration, and automatic reconnection are not implemented.
+- Desktop keeps the host OS cursor and has no host IME/preedit integration yet. The explicit-command
+  `russh` mode does not read `~/.ssh/config` or use ssh-agent; interactive OpenSSH mode uses both.
+  Xwayland shell integration and automatic reconnection are not implemented.
 
 ## Development
 

@@ -313,6 +313,17 @@ impl ApplicationHandler<SessionEvent> for App {
                     log::info!("remote: {line}");
                 }
             }
+            SessionEvent::TransportClosed { message, failed } => {
+                if failed {
+                    self.exit_code = 1;
+                    log::error!("{message}");
+                } else {
+                    log::debug!("{message}");
+                }
+                if self.connections.is_empty() && self.renderer.is_empty() {
+                    event_loop.exit();
+                }
+            }
         }
     }
 

@@ -1,4 +1,6 @@
 mod app;
+#[cfg(unix)]
+mod openssh;
 mod session;
 
 use std::path::PathBuf;
@@ -29,7 +31,10 @@ impl From<CompressionArg> for Compression {
 }
 
 #[derive(Debug, Parser)]
-#[command(about = "Display remote Wayland applications as native windows via Waypipe")]
+#[command(
+    about = "Display remote Wayland applications as native windows via Waypipe",
+    long_about = "Display remote Wayland applications as native windows via Waypipe.\n\nWith --ssh and no -- <COMMAND>, macOS and Unix hosts start a system OpenSSH login shell (using ~/.ssh/config and SSH agents) and forward every Wayland program launched from it. An explicit -- <COMMAND> uses the built-in russh transport without a PTY."
+)]
 struct Args {
     #[arg(long, conflicts_with = "ssh")]
     socket: Option<PathBuf>,
@@ -78,7 +83,7 @@ fn env_value(name: &str) -> Result<String, String> {
     std::env::var(name).map_err(|_| format!("environment variable {name} is not set"))
 }
 
-fn parse_endpoint(target: &str) -> Result<(Option<String>, String, u16), String> {
+fn parse_endpoint(target: &str) -> Result<(Option<String>, String, Option<u16>), String> {
     let (user, address) = target
         .rsplit_once('@')
         .map_or((None, target), |(user, address)| {
@@ -91,17 +96,17 @@ fn parse_endpoint(target: &str) -> Result<(Option<String>, String, u16), String>
         let port = port
             .parse::<u16>()
             .map_err(|_| "invalid SSH port".to_string())?;
-        return Ok((user, host.to_owned(), port));
+        return Ok((user, host.to_owned(), Some(port)));
     }
     if let Some((host, port)) = address.rsplit_once(':') {
         if !host.contains(':') {
             let port = port
                 .parse::<u16>()
                 .map_err(|_| "invalid SSH port".to_string())?;
-            return Ok((user, host.to_owned(), port));
+            return Ok((user, host.to_owned(), Some(port)));
         }
     }
-    Ok((user, address.to_owned(), 22))
+    Ok((user, address.to_owned(), None))
 }
 
 fn session_target(args: &Args) -> Result<SessionTarget, String> {
@@ -149,7 +154,7 @@ fn session_target(args: &Args) -> Result<SessionTarget, String> {
     Ok(SessionTarget::Ssh {
         config: Box::new(SshConfig {
             host,
-            port: args.port.unwrap_or(endpoint_port),
+            port: args.port.or(endpoint_port).unwrap_or(22),
             user,
             authentication,
             known_hosts: args.known_hosts.clone(),
@@ -159,12 +164,74 @@ fn session_target(args: &Args) -> Result<SessionTarget, String> {
     })
 }
 
+#[cfg(unix)]
+fn interactive_options(args: &Args) -> Result<openssh::OpenSshOptions, String> {
+    if args.password_env.is_some() || args.passphrase_env.is_some() {
+        return Err(
+            "--password-env and --passphrase-env are only supported with an explicit -- <COMMAND>; \
+             interactive OpenSSH mode uses ssh-agent, ~/.ssh/config, and OpenSSH's own prompts"
+                .to_string(),
+        );
+    }
+    let (endpoint_user, host, endpoint_port) = parse_endpoint(
+        args.ssh
+            .as_deref()
+            .ok_or_else(|| "--ssh is required for interactive mode".to_string())?,
+    )?;
+    let destination = match args.user.clone().or(endpoint_user) {
+        Some(user) => format!("{user}@{host}"),
+        None => host,
+    };
+    let mut remote =
+        RemoteWaypipe::login_shell(args.compression.into()).with_binary(args.waypipe_bin.clone());
+    if let Some(path) = &args.remote_socket {
+        remote = remote
+            .with_remote_socket(path.clone())
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(openssh::OpenSshOptions {
+        destination,
+        port: args.port.or(endpoint_port),
+        identity: args.identity.clone(),
+        known_hosts: args.known_hosts.clone(),
+        accept_new_host_key: args.accept_new_host_key,
+        remote,
+    })
+}
+
 fn main() -> Result<std::process::ExitCode, Box<dyn std::error::Error>> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
-    let target = session_target(&args).map_err(|error| format!("argument error: {error}"))?;
+    let interactive = args.ssh.is_some() && args.command.is_empty();
     let compression = Compression::from(args.compression);
     let event_loop = EventLoop::<session::SessionEvent>::with_user_event().build()?;
+    #[cfg(unix)]
+    let mut interactive_session = None;
+
+    let target = if interactive {
+        #[cfg(unix)]
+        {
+            let options =
+                interactive_options(&args).map_err(|error| format!("argument error: {error}"))?;
+            match openssh::start(options, event_loop.create_proxy()) {
+                Ok((target, session)) => {
+                    interactive_session = Some(session);
+                    target
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            return Err(
+                "interactive OpenSSH shells are only supported on macOS/Unix; pass an explicit -- <COMMAND> on Windows"
+                    .into(),
+            );
+        }
+    } else {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+        session_target(&args).map_err(|error| format!("argument error: {error}"))?
+    };
+
     let manager = SessionManager::start(target, event_loop.create_proxy());
     let mut app = App::new(
         manager,
@@ -174,7 +241,10 @@ fn main() -> Result<std::process::ExitCode, Box<dyn std::error::Error>> {
         },
         args.exit_after_frames,
     );
-    event_loop.run_app(&mut app)?;
+    let result = event_loop.run_app(&mut app);
+    #[cfg(unix)]
+    drop(interactive_session);
+    result?;
     Ok(std::process::ExitCode::from(app.exit_code()))
 }
 
@@ -182,19 +252,51 @@ fn main() -> Result<std::process::ExitCode, Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn interactive_mode_uses_config_aliases_and_rejects_environment_secrets() {
+        let args = Args::parse_from(["waypane-desktop", "--ssh", "workstation"]);
+        let options = interactive_options(&args).unwrap();
+        assert_eq!(options.destination, "workstation");
+        assert_eq!(options.port, None);
+        assert!(options.remote.is_login_shell());
+
+        let args = Args::parse_from([
+            "waypane-desktop",
+            "--ssh",
+            "workstation",
+            "--password-env",
+            "WAYPANE_PASSWORD",
+        ]);
+        assert!(interactive_options(&args)
+            .unwrap_err()
+            .contains("only supported with an explicit -- <COMMAND>"));
+
+        let args = Args::parse_from([
+            "waypane-desktop",
+            "--ssh",
+            "otherhost:2222",
+            "--user",
+            "alice",
+        ]);
+        let options = interactive_options(&args).unwrap();
+        assert_eq!(options.destination, "alice@otherhost");
+        assert_eq!(options.port, Some(2222));
+    }
+
     #[test]
     fn parses_ssh_endpoints() {
         assert_eq!(
             parse_endpoint("alice@example.test:2222").unwrap(),
-            (Some("alice".into()), "example.test".into(), 2222)
+            (Some("alice".into()), "example.test".into(), Some(2222))
         );
         assert_eq!(
             parse_endpoint("root@[::1]:8022").unwrap(),
-            (Some("root".into()), "::1".into(), 8022)
+            (Some("root".into()), "::1".into(), Some(8022))
         );
         assert_eq!(
             parse_endpoint("localhost").unwrap(),
-            (None, "localhost".into(), 22)
+            (None, "localhost".into(), None)
         );
     }
 }

@@ -12,9 +12,10 @@ use russh::{Channel, ChannelMsg, ChannelStream, Disconnect};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::error::{Error, Result};
-use crate::remote::{RemoteSocket, RemoteWaypipe, MAX_REMOTE_SOCKET_BYTES};
+use crate::remote::{
+    RemoteSocket, RemoteWaypipe, MAX_REMOTE_SOCKET_BYTES, REMOTE_DIRECTORY_COMMAND,
+};
 
-const REMOTE_DIRECTORY_COMMAND: &str = "if [ -n \"${TMPDIR:-}\" ] && [ -d \"$TMPDIR\" ] && [ -w \"$TMPDIR\" ]; then printf %s \"$TMPDIR\"; elif [ -n \"${XDG_RUNTIME_DIR:-}\" ] && [ -d \"$XDG_RUNTIME_DIR\" ] && [ -w \"$XDG_RUNTIME_DIR\" ]; then printf %s \"$XDG_RUNTIME_DIR\"; elif [ -d /tmp ] && [ -w /tmp ]; then printf %s /tmp; else exit 3; fi";
 const MAX_KNOWN_HOSTS_BYTES: usize = 4 * 1024 * 1024;
 const MAX_COMMAND_STDERR_BYTES: usize = 4096;
 
@@ -440,6 +441,12 @@ pub struct SshSession {
 
 impl SshSession {
     pub async fn connect(config: SshConfig, remote: &RemoteWaypipe) -> Result<Self> {
+        if remote.is_login_shell() {
+            return Err(Error::InvalidConfiguration(
+                "a login shell requires a PTY; use the desktop OpenSSH interactive mode"
+                    .to_string(),
+            ));
+        }
         let (incoming_tx, incoming) = mpsc::channel(16);
         let handler = SshHandler {
             host: config.host.clone(),

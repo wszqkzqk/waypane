@@ -8,6 +8,7 @@ use crate::error::{Error, Result};
 static SOCKET_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub const MAX_REMOTE_SOCKET_BYTES: usize = 100;
+pub const REMOTE_DIRECTORY_COMMAND: &str = "if [ -n \"${TMPDIR:-}\" ] && [ -d \"$TMPDIR\" ] && [ -w \"$TMPDIR\" ]; then printf %s \"$TMPDIR\"; elif [ -n \"${XDG_RUNTIME_DIR:-}\" ] && [ -d \"$XDG_RUNTIME_DIR\" ] && [ -w \"$XDG_RUNTIME_DIR\" ]; then printf %s \"$XDG_RUNTIME_DIR\"; elif [ -d /tmp ] && [ -w /tmp ]; then printf %s /tmp; else exit 3; fi";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteSocket {
@@ -21,6 +22,7 @@ pub struct RemoteWaypipe {
     pub binary: String,
     pub compression: Compression,
     pub command: Vec<String>,
+    login_shell: bool,
 }
 
 impl RemoteWaypipe {
@@ -30,19 +32,36 @@ impl RemoteWaypipe {
                 "remote command must not be empty".to_string(),
             ));
         }
+        Ok(Self::with_unique_socket(compression, command, false))
+    }
+
+    pub fn login_shell(compression: Compression) -> Self {
+        Self::with_unique_socket(compression, Vec::new(), true)
+    }
+
+    fn with_unique_socket(
+        compression: Compression,
+        command: Vec<String>,
+        login_shell: bool,
+    ) -> Self {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
         let sequence = SOCKET_COUNTER.fetch_add(1, Ordering::Relaxed);
-        Ok(Self {
+        Self {
             socket: RemoteSocket::Auto {
                 file_name: format!("wp-{:x}-{nonce:x}-{sequence:x}.sock", std::process::id()),
             },
             binary: "waypipe".to_string(),
             compression,
             command,
-        })
+            login_shell,
+        }
+    }
+
+    pub fn is_login_shell(&self) -> bool {
+        self.login_shell
     }
 
     pub fn with_binary(mut self, binary: impl Into<String>) -> Self {
@@ -78,7 +97,7 @@ impl RemoteWaypipe {
         }
     }
 
-    pub fn command_line(&self, socket_path: &str) -> String {
+    fn command_prefix(&self, socket_path: &str) -> Vec<String> {
         let compression = match self.compression {
             Compression::None => "none",
             Compression::Lz4 => "lz4",
@@ -91,7 +110,7 @@ impl RemoteWaypipe {
                 directory
             }
         });
-        let mut parts = vec![
+        vec![
             "env".to_string(),
             format!("XDG_RUNTIME_DIR={}", shell_quote(runtime_dir)),
             shell_quote(&self.binary),
@@ -100,11 +119,31 @@ impl RemoteWaypipe {
             compression.to_string(),
             "--socket".to_string(),
             shell_quote(socket_path),
-            "server".to_string(),
-            "--".to_string(),
-        ];
+        ]
+    }
+
+    pub fn command_line(&self, socket_path: &str) -> String {
+        let mut parts = self.command_prefix(socket_path);
+        parts.push("server".to_string());
+        parts.push("--".to_string());
         parts.extend(self.command.iter().map(|argument| shell_quote(argument)));
         parts.join(" ")
+    }
+
+    pub fn login_shell_command_line(&self, socket_path: &str) -> Result<String> {
+        if !self.login_shell || !self.command.is_empty() {
+            return Err(Error::InvalidConfiguration(
+                "login-shell command requires a RemoteWaypipe::login_shell configuration"
+                    .to_string(),
+            ));
+        }
+        let mut parts = self.command_prefix(socket_path);
+        parts.extend([
+            "--login-shell".to_string(),
+            "--unlink-socket".to_string(),
+            "server".to_string(),
+        ]);
+        Ok(parts.join(" "))
     }
 }
 
@@ -168,6 +207,25 @@ mod tests {
             remote.command_line(&path),
             format!("env XDG_RUNTIME_DIR=/data/data/com.termux/files/usr/tmp waypipe --no-gpu --compress zstd --socket {path} server -- foot")
         );
+    }
+
+    #[test]
+    fn builds_login_shell_command_separately_from_program_commands() {
+        let remote = RemoteWaypipe::login_shell(Compression::Zstd)
+            .with_remote_socket("/tmp/waypane.sock")
+            .unwrap();
+        assert!(remote.is_login_shell());
+        assert_eq!(
+            remote
+                .login_shell_command_line("/tmp/waypane.sock")
+                .unwrap(),
+            "env XDG_RUNTIME_DIR=/tmp waypipe --no-gpu --compress zstd --socket /tmp/waypane.sock --login-shell --unlink-socket server"
+        );
+
+        let program = RemoteWaypipe::new(Compression::Lz4, vec!["foot".into()]).unwrap();
+        assert!(program
+            .login_shell_command_line("/tmp/waypane.sock")
+            .is_err());
     }
 
     #[test]
