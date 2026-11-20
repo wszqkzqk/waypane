@@ -4,29 +4,76 @@
   # Waypane
 </div>
 
-Waypane displays Wayland applications from a remote Linux host or local Termux environment as
-native windows on **Android, macOS, and Windows**, over SSH. The host only needs `sshd` and the
-stock `waypipe` binary; Waypane starts `waypipe server -- <command>` automatically.
+Waypane is **window-level Wayland forwarding over SSH** for **Android, macOS, and Windows**. You
+pick the Linux application to launch, and its Wayland windows appear on your device instead of
+sending a video stream of somebody's entire desktop.
 
-There is no Waypane daemon to install on the host, and the host does not need a running desktop,
-compositor, GPU, or root access.
+The application host needs only `sshd` and the stock `waypipe` binary. Waypane starts
+`waypipe server -- <command>` automatically; there is no Waypane daemon to install, and the host
+does not need a monitor, running compositor, desktop environment, GPU, VNC/RDP server, or root
+access at runtime.
 
 > **Status:** early development. The SSH/Waypipe/SHM path and the Android app have been exercised
 > on-device against upstream Waypipe 0.11.3. macOS and Windows are built and tested in CI, but
 > interactive desktop coverage is still limited, especially on physical Windows machines.
 
-## Features
+## What you can do with it
 
-- **Headless-friendly:** works with a minimal SSH server through shared memory (`--no-gpu`).
-- **Real Wayland windows:** multiple toplevels, popups, subsurfaces, cursors, and window metadata.
-- **Native display scaling:** integer `wl_surface.preferred_buffer_scale` on Android and per-window
-  host scale tracking on desktop, alongside pinch zoom and fit-to-view presentation.
-- **Input and clipboard:** keyboard, pointer, touch, scrolling, text-input-v3 with soft-keyboard
-  preedit on Android, and two-way text clipboard synchronization.
-- **Mobile-ready controls:** pointer emulation or direct touch, auto-resize, landscape side rail,
-  fullscreen mode, and a keyboard-aware view that pans without resizing the remote window.
-- **SSH security and diagnostics:** password or public-key authentication, encrypted private keys,
-  SHA-256 host-key confirmation, and clear remote command errors including exit code and stderr.
+### Run individual Linux apps from macOS, Windows, or Android
+
+Point Waypane at any Linux machine you can SSH into—a headless server, cloud VM, container host, or
+desktop you left elsewhere—and launch the application you need with a command such as `foot`,
+`nautilus`, or `gtk4-demo`.
+
+- **Truly headless hosts work:** applications can render with the host CPU through shared memory
+  (`--no-gpu`), so there is nothing to configure for an X server, display manager, or GPU.
+- **It starts what you ask for:** each session runs an application command instead of attaching to
+  a preconfigured desktop session. Multiple windows, popups, menus, cursors, native integer display
+  scaling on every platform, keyboard/pointer input, and text clipboard work through the same
+  connection.
+- **SSH stays the control and security boundary:** password or public-key authentication (including
+  encrypted keys), SHA-256 host-key confirmation, and explicit errors when the command or `waypipe`
+  is missing.
+
+### Give Android Termux a local Wayland desktop—or just one GUI app
+
+Waypane doubles as a native display for Termux over local SSH (`127.0.0.1:8022`), without pairing
+Termux with a separate VNC viewer or X server.
+
+- **Full local desktop shell:** set the application command to `weston`. Weston runs headless inside
+  Termux and appears in Waypane; open its terminal and start more Wayland apps inside that desktop.
+  Larger desktop environments still require their usual D-Bus and session services on the host.
+- **Single app, no desktop:** set the command to `foot` or another installed Wayland application.
+  The app gets the phone's usable display area directly, which is useful when all you want is a
+  terminal or one graphical tool.
+- **Termux paths are handled automatically:** Waypane discovers `$TMPDIR` over SSH, sets
+  `XDG_RUNTIME_DIR`, and creates the Waypipe socket there, so `/tmp` is not required.
+
+### Use remote Linux apps comfortably on a phone
+
+Android can connect to remote Linux hosts with the same per-window model, adapted to a small touch
+screen instead of presenting a shrunken desktop image.
+
+- **Readable by default:** density-aware native Wayland scaling (Auto or 1x–4x) makes remote text and
+  controls render larger, while Auto-resize asks apps to fit the visible area.
+- **Touch-first input:** tap to click, drag to move or select, long-press for right click, two-finger
+  scroll, pinch zoom and pan, or native `wl_touch`. Keys opens the soft keyboard; the view pans above
+  it without distorting or resizing the remote window.
+- **Made for switching tasks:** landscape uses a compact side rail and the full usable height, while
+  a foreground service keeps the SSH session and remote windows alive when you leave the app with
+  Home or Recents.
+
+### How this differs from full-desktop remoting
+
+| | VNC/RDP-style desktop remoting | Waypane |
+| --- | --- | --- |
+| Host setup | A desktop session plus a remote-desktop service | `sshd` and `waypipe` |
+| What is forwarded | An entire preconfigured desktop framebuffer | The windows of the application command you choose |
+| Session startup | Attach to an already configured session | Start `waypipe server -- <command>` on demand |
+| Headless use | Typically needs a virtual display or desktop stack | Shared-memory rendering on a host without a display or GPU |
+
+Waypane targets interactive desktop GUI applications over CPU-rendered shared memory, not GPU
+pass-through or game streaming.
 
 ## Quick start
 
