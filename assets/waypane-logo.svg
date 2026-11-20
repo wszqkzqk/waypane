@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="waypane-logo-title waypane-logo-desc">
   <title id="waypane-logo-title">Waypane</title>
-  <desc id="waypane-logo-desc">A flowing W inside a Wayland window pane streaming into a phone pane.</desc>
+  <desc id="waypane-logo-desc">A flowing W linking a Wayland source window to a native receiver window.</desc>
   <defs>
     <linearGradient id="pane" x1="72" y1="72" x2="440" y2="440" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#22D3EE"/>
@@ -16,12 +16,15 @@
       <stop offset="0.55" stop-color="#F0F9FF"/>
       <stop offset="1" stop-color="#EDE9FE"/>
     </linearGradient>
-    <linearGradient id="phone" x1="312" y1="228" x2="432" y2="428" gradientUnits="userSpaceOnUse">
+    <linearGradient id="inset" x1="302" y1="252" x2="450" y2="408" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#1E293B"/>
       <stop offset="1" stop-color="#020617"/>
     </linearGradient>
     <clipPath id="pane-clip">
       <rect x="72" y="72" width="368" height="336" rx="56"/>
+    </clipPath>
+    <clipPath id="receiver-clip">
+      <rect x="302" y="218" width="148" height="190" rx="20"/>
     </clipPath>
   </defs>
 
@@ -36,13 +39,17 @@
   </g>
 
   <g>
-    <rect x="304" y="224" width="144" height="224" rx="38" fill="#0F172A" fill-opacity="0.2"/>
-    <rect x="300" y="216" width="144" height="224" rx="38" fill="#F8FAFC"/>
-    <rect x="312" y="228" width="120" height="200" rx="28" fill="url(#phone)"/>
-    <rect x="353" y="241" width="38" height="8" rx="4" fill="#475569"/>
-    <rect x="332" y="276" width="80" height="14" rx="7" fill="url(#pane)"/>
-    <rect x="332" y="306" width="56" height="14" rx="7" fill="#67E8F9" fill-opacity="0.88"/>
-    <rect x="332" y="336" width="68" height="14" rx="7" fill="#A78BFA" fill-opacity="0.9"/>
-    <rect x="353" y="405" width="38" height="7" rx="3.5" fill="#64748B"/>
+    <rect x="296" y="214" width="168" height="200" rx="28" fill="#0F172A" fill-opacity="0.2"/>
+    <rect x="292" y="208" width="168" height="200" rx="28" fill="#F8FAFC"/>
+    <g clip-path="url(#receiver-clip)">
+      <rect x="302" y="218" width="148" height="190" fill="url(#inset)"/>
+      <path d="M322 218H430C441.046 218 450 226.954 450 238V252H302V238C302 226.954 310.954 218 322 218Z" fill="#E2E8F0"/>
+    </g>
+    <circle cx="322" cy="235" r="5" fill="#3B82F6"/>
+    <circle cx="340" cy="235" r="5" fill="#94A3B8"/>
+    <circle cx="358" cy="235" r="5" fill="#CBD5E1"/>
+    <rect x="322" y="268" width="100" height="14" rx="7" fill="#60A5FA"/>
+    <rect x="322" y="300" width="64" height="14" rx="7" fill="#67E8F9" fill-opacity="0.9"/>
+    <rect x="322" y="332" width="82" height="14" rx="7" fill="#A78BFA" fill-opacity="0.92"/>
   </g>
 </svg>

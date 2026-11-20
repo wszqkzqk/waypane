@@ -35,7 +35,8 @@ daemon is not required.
   keyboard, and clipboard integration. The session-owned native handle lives in an
   application-scoped store rather than an Activity `ViewModel`, and a `specialUse` foreground
   `SessionService` with an ongoing Open/Disconnect notification keeps SSH sessions alive when
-  the Activity is destroyed or moved to the background
+  the Activity is destroyed or moved to the background. Adaptive launcher icons and Android 13+
+  monochrome icons derive from the device-neutral `assets/waypane-logo.svg` master mark
 - `vendor/waypipe`: unmodified upstream Waypipe `v0.11.3`, used as the protocol reference and
   integration-test peer
 
