@@ -164,7 +164,11 @@ async fn run(
 }
 
 #[cfg(unix)]
-async fn run_local(listener: LocalListener, routes: Routes, proxy: EventLoopProxy<SessionEvent>) {
+async fn run_local(
+    mut listener: LocalListener,
+    routes: Routes,
+    proxy: EventLoopProxy<SessionEvent>,
+) {
     let mut connected = false;
     loop {
         if connected && lock_routes(&routes).is_empty() {

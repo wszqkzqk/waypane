@@ -761,8 +761,14 @@ fn append_stderr_tail(tail: &mut Vec<u8>, data: &[u8]) {
 
 #[cfg(unix)]
 pub struct LocalListener {
-    listener: tokio::net::UnixListener,
+    listener: LocalListenerSocket,
     path: PathBuf,
+}
+
+#[cfg(unix)]
+enum LocalListenerSocket {
+    Unregistered(std::os::unix::net::UnixListener),
+    Registered(tokio::net::UnixListener),
 }
 
 #[cfg(unix)]
@@ -784,12 +790,28 @@ impl LocalListener {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        let listener = tokio::net::UnixListener::bind(&path)?;
-        Ok(Self { listener, path })
+        let listener = std::os::unix::net::UnixListener::bind(&path)?;
+        listener.set_nonblocking(true)?;
+        Ok(Self {
+            listener: LocalListenerSocket::Unregistered(listener),
+            path,
+        })
     }
 
-    pub async fn accept(&self) -> Result<tokio::net::UnixStream> {
-        Ok(self.listener.accept().await?.0)
+    /// Accepts the next connection, registering the listener with the current Tokio runtime on
+    /// first use so binding itself does not require a runtime.
+    pub async fn accept(&mut self) -> Result<tokio::net::UnixStream> {
+        if let LocalListenerSocket::Unregistered(listener) = &self.listener {
+            let listener = listener.try_clone()?;
+            self.listener =
+                LocalListenerSocket::Registered(tokio::net::UnixListener::from_std(listener)?);
+        }
+        match &self.listener {
+            LocalListenerSocket::Registered(listener) => Ok(listener.accept().await?.0),
+            LocalListenerSocket::Unregistered(_) => {
+                unreachable!("listener is registered before accepting")
+            }
+        }
     }
 }
 
@@ -910,6 +932,41 @@ mod tests {
         );
         assert!(result.unwrap_err().to_string().contains("cancelled"));
         assert!(!channel.is_pending());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_listener_binds_without_a_tokio_runtime() {
+        let path = temp_file("listener-sync");
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let listener = LocalListener::bind(&path).unwrap();
+        let client = std::os::unix::net::UnixStream::connect(&path).unwrap();
+        drop(client);
+        drop(listener);
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_listener_bound_without_runtime_accepts_repeatedly_in_runtime() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let path = temp_file("listener-async");
+        let bind_path = path.clone();
+        let mut listener = tokio::task::spawn_blocking(move || LocalListener::bind(bind_path))
+            .await
+            .unwrap()
+            .unwrap();
+        for byte in [1_u8, 2] {
+            let mut client = tokio::net::UnixStream::connect(&path).await.unwrap();
+            let mut server = listener.accept().await.unwrap();
+            client.write_all(&[byte]).await.unwrap();
+            let mut received = [0];
+            server.read_exact(&mut received).await.unwrap();
+            assert_eq!(received, [byte]);
+        }
+        drop(listener);
+        assert!(!path.exists());
     }
 
     #[test]
