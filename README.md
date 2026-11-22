@@ -12,10 +12,6 @@ The host needs only `sshd` and stock `waypipe`. Waypane starts `waypipe server -
 you; no Waypane daemon, monitor, running compositor, desktop environment, GPU, or VNC/RDP server is
 required on the host.
 
-> **Status:** early development. Android is tested on-device with upstream Waypipe 0.11.3. macOS and
-> Windows are built and tested in CI, with limited interactive desktop coverage, especially on
-> physical Windows machines.
-
 ## Why Waypane
 
 ### Run Linux apps on macOS, Windows, or Android
