@@ -19,6 +19,25 @@ fun signingSetting(environmentName: String, propertyName: String): String? =
 
 val releaseKeystoreFile = signingSetting("WAYPANE_KEYSTORE_FILE", "storeFile")
 
+fun gitOutput(vararg arguments: String): String? =
+    try {
+        // providers.exec: plain exec is rejected at configuration time by Gradle 9's configuration cache.
+        providers.exec { commandLine("git", *arguments) }
+            .standardOutput.asText.get()
+            .trim()
+            .ifBlank { null }
+    } catch (_: Exception) {
+        null
+    }
+
+// APK version from git: commit count grows for every build; vX.Y.Z tags name releases;
+// --always keeps untagged history identifiable by commit hash. CI needs fetch-depth: 0.
+val apkVersionCode = gitOutput("rev-list", "--count", "HEAD")?.toIntOrNull() ?: 1
+val apkVersionName = gitOutput("describe", "--tags", "--abbrev=12", "--always")
+    ?.removePrefix("v")
+    ?.replace('-', '.')
+    ?: "0.1.0"
+
 val rustJniLibs = layout.buildDirectory.dir("rustJniLibs")
 val rustCrateDir = rootDir.resolve("../../crates/waypane-android").normalize()
 
@@ -61,8 +80,8 @@ android {
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = apkVersionCode
+        versionName = apkVersionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

@@ -154,6 +154,11 @@ gradle :app:assembleRelease
 # app/build/outputs/apk/release/app-release.apk
 ```
 
+APK versions come from git: `versionCode` is the commit count (`git rev-list --count HEAD`) and
+`versionName` is `git describe --tags --abbrev=12 --always` without the leading `v` (`-` becomes `.`,
+so `v0.2.0` builds `0.2.0` and untagged commits build `0.2.0.12.gabcdef123456` or a commit hash).
+Source archives without `.git` fall back to `1` / `0.1.0`.
+
 For a stable release signature, keep the keystore out of version control and set
 `WAYPANE_KEYSTORE_FILE`, `WAYPANE_KEYSTORE_PASSWORD`, `WAYPANE_KEY_ALIAS`, and
 `WAYPANE_KEY_PASSWORD` before running `assembleRelease`. Local builds can instead load `storeFile`,
