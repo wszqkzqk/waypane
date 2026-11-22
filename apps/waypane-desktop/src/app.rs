@@ -92,6 +92,12 @@ impl App {
         self.renderer.close_session(session);
     }
 
+    fn disconnect_all(&mut self) {
+        for session in self.connections.keys().copied().collect::<Vec<_>>() {
+            self.disconnect(session);
+        }
+    }
+
     fn handle_data(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -326,9 +332,10 @@ impl ApplicationHandler<SessionEvent> for App {
                 } else {
                     log::debug!("{message}");
                 }
-                if self.connections.is_empty() && self.renderer.is_empty() {
-                    event_loop.exit();
-                }
+                // The transport may die while forwarded windows are still open; its session
+                // disconnects then arrive after this notification. Tear them down together.
+                self.disconnect_all();
+                event_loop.exit();
             }
         }
     }

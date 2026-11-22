@@ -23,6 +23,13 @@ pub enum SessionEvent {
     Data(SessionId, Bytes),
     Disconnected(SessionId),
     Output(String),
+    #[cfg_attr(
+        not(unix),
+        allow(
+            dead_code,
+            reason = "only produced by the Unix system OpenSSH interactive session"
+        )
+    )]
     TransportClosed {
         message: String,
         failed: bool,
@@ -102,6 +109,8 @@ async fn run(
     let routes: Routes = Arc::new(Mutex::new(HashMap::new()));
     let router = routes.clone();
     let (shutdown, local_shutdown) = tokio::sync::watch::channel(());
+    #[cfg(not(unix))]
+    let _ = (exit_when_idle, &local_shutdown);
     tokio::spawn(async move {
         let _shutdown = shutdown;
         while let Some(command) = commands.recv().await {
