@@ -50,20 +50,32 @@ pub enum SessionTarget {
 
 type Routes = Arc<Mutex<HashMap<SessionId, mpsc::Sender<Bytes>>>>;
 
+/// Whether closing every forwarded session and window ends the client (explicit commands), or
+/// leaves it serving the login shell until its SSH transport closes (interactive mode).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExitWhenIdle {
+    Yes,
+    No,
+}
+
 #[derive(Clone)]
 pub struct SessionManager {
     commands: mpsc::Sender<SessionCommand>,
 }
 
 impl SessionManager {
-    pub fn start(target: SessionTarget, proxy: EventLoopProxy<SessionEvent>) -> Self {
+    pub fn start(
+        target: SessionTarget,
+        proxy: EventLoopProxy<SessionEvent>,
+        exit_when_idle: ExitWhenIdle,
+    ) -> Self {
         let (commands, receiver) = mpsc::channel(64);
         thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .expect("failed to create Tokio runtime");
-            runtime.block_on(run(target, receiver, proxy));
+            runtime.block_on(run(target, receiver, proxy, exit_when_idle));
         });
         Self { commands }
     }
@@ -85,10 +97,13 @@ async fn run(
     target: SessionTarget,
     mut commands: mpsc::Receiver<SessionCommand>,
     proxy: EventLoopProxy<SessionEvent>,
+    exit_when_idle: ExitWhenIdle,
 ) {
     let routes: Routes = Arc::new(Mutex::new(HashMap::new()));
     let router = routes.clone();
+    let (shutdown, local_shutdown) = tokio::sync::watch::channel(());
     tokio::spawn(async move {
+        let _shutdown = shutdown;
         while let Some(command) = commands.recv().await {
             match command {
                 SessionCommand::Send(session, data) => {
@@ -109,7 +124,16 @@ async fn run(
     match target {
         #[cfg(unix)]
         SessionTarget::Local(path) => match LocalListener::bind(path) {
-            Ok(listener) => run_local(listener, routes.clone(), proxy.clone()).await,
+            Ok(listener) => {
+                run_local(
+                    listener,
+                    routes.clone(),
+                    proxy.clone(),
+                    exit_when_idle,
+                    local_shutdown,
+                )
+                .await
+            }
             Err(error) => send_proxy(&proxy, error_event(None, error)),
         },
         #[cfg(not(unix))]
@@ -121,7 +145,16 @@ async fn run(
             );
         }
         #[cfg(unix)]
-        SessionTarget::Bound(listener) => run_local(listener, routes.clone(), proxy.clone()).await,
+        SessionTarget::Bound(listener) => {
+            run_local(
+                listener,
+                routes.clone(),
+                proxy.clone(),
+                exit_when_idle,
+                local_shutdown,
+            )
+            .await
+        }
         SessionTarget::Ssh { config, remote } => {
             match SshSession::connect(*config, &remote).await {
                 Ok(mut session) => {
@@ -168,39 +201,36 @@ async fn run_local(
     mut listener: LocalListener,
     routes: Routes,
     proxy: EventLoopProxy<SessionEvent>,
+    exit_when_idle: ExitWhenIdle,
+    mut shutdown: tokio::sync::watch::Receiver<()>,
 ) {
     let mut connected = false;
     loop {
-        if connected && lock_routes(&routes).is_empty() {
+        if connected && exit_when_idle == ExitWhenIdle::Yes && lock_routes(&routes).is_empty() {
             break;
         }
-        if connected {
+        let result = if connected && exit_when_idle == ExitWhenIdle::Yes {
             tokio::select! {
-                result = listener.accept() => {
-                    match result {
-                        Ok(stream) => {
-                            let id = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
-                            spawn_stream(id, stream, routes.clone(), proxy.clone());
-                        }
-                        Err(error) => {
-                            send_proxy(&proxy, error_event(None, error));
-                            break;
-                        }
-                    }
-                }
-                _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+                result = listener.accept() => Some(result),
+                _ = shutdown.changed() => None,
+                _ = tokio::time::sleep(Duration::from_millis(50)) => continue,
             }
         } else {
-            match listener.accept().await {
-                Ok(stream) => {
-                    connected = true;
-                    let id = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
-                    spawn_stream(id, stream, routes.clone(), proxy.clone());
-                }
-                Err(error) => {
-                    send_proxy(&proxy, error_event(None, error));
-                    break;
-                }
+            tokio::select! {
+                result = listener.accept() => Some(result),
+                _ = shutdown.changed() => None,
+            }
+        };
+        let Some(result) = result else { break };
+        match result {
+            Ok(stream) => {
+                connected = true;
+                let id = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
+                spawn_stream(id, stream, routes.clone(), proxy.clone());
+            }
+            Err(error) => {
+                send_proxy(&proxy, error_event(None, error));
+                break;
             }
         }
     }

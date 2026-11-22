@@ -232,7 +232,12 @@ fn main() -> Result<std::process::ExitCode, Box<dyn std::error::Error>> {
         session_target(&args).map_err(|error| format!("argument error: {error}"))?
     };
 
-    let manager = SessionManager::start(target, event_loop.create_proxy());
+    let exit_when_idle = if interactive {
+        session::ExitWhenIdle::No
+    } else {
+        session::ExitWhenIdle::Yes
+    };
+    let manager = SessionManager::start(target, event_loop.create_proxy(), exit_when_idle);
     let mut app = App::new(
         manager,
         ClientConfig {
@@ -240,6 +245,7 @@ fn main() -> Result<std::process::ExitCode, Box<dyn std::error::Error>> {
             ..ClientConfig::default()
         },
         args.exit_after_frames,
+        exit_when_idle,
     );
     let result = event_loop.run_app(&mut app);
     #[cfg(unix)]

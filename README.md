@@ -87,7 +87,9 @@ Use `--password-env WAYPANE_PASSWORD` for password authentication and `--passphr
 WAYPANE_PASSPHRASE` for an encrypted key. Host keys are read from `~/.ssh/known_hosts` unless
 `--known-hosts PATH` is given; `--accept-new-host-key` saves unknown keys but never accepts changed
 keys. See `waypane-desktop --help` for compression, remote-socket, custom-waypipe, and local-socket
-options. `lz4` is the default; use `zstd` on slow links.
+options. `lz4` is the default; use `zstd` on slow links. Explicit-command mode does not read
+`~/.ssh/config`: pass the user (`USER@HOST` or `--user`) and a real host name or IP instead of an
+SSH alias. With an explicit command, Waypane exits once that command and its windows have closed.
 
 On macOS and other Unix hosts, omitting `-- <COMMAND>` starts an interactive system OpenSSH shell
 instead of the built-in `russh` launcher:
@@ -98,7 +100,9 @@ waypane-desktop --ssh work-server
 
 This form uses `~/.ssh/config`, host aliases, ProxyJump, ssh-agent, OpenSSH's host-key prompts, and a
 PTY. Waypipe starts your login shell on the remote host; run `nautilus`, `gtk4-demo`, or another
-`foot` from that shell and each GUI client is forwarded as a separate Waypipe session. Explicit
+`foot` from that shell and each GUI client is forwarded as a separate Waypipe session. Closing a
+forwarded window only ends that remote application; Waypane keeps the login shell and SSH connection
+until the shell exits or you quit Waypane. Explicit
 `--port`/`:port`, `--identity`, `--known-hosts`, and `--accept-new-host-key` are mapped to OpenSSH
 options, while `--password-env` and `--passphrase-env` are available only in explicit-command mode.
 Rust diagnostics are written to a separate log file instead of corrupting the terminal UI; the file

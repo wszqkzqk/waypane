@@ -10,7 +10,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::PhysicalKey;
 use winit::window::WindowId as NativeWindowId;
 
-use crate::session::{SessionEvent, SessionId, SessionManager};
+use crate::session::{ExitWhenIdle, SessionEvent, SessionId, SessionManager};
 
 pub struct App {
     connections: HashMap<SessionId, Connection>,
@@ -20,6 +20,7 @@ pub struct App {
     clock: Instant,
     presented_frames: usize,
     exit_after_frames: Option<usize>,
+    exit_when_idle: ExitWhenIdle,
     finish_when_idle: bool,
     saw_session: bool,
     exit_code: u8,
@@ -33,6 +34,7 @@ impl App {
         manager: SessionManager,
         config: ClientConfig,
         exit_after_frames: Option<usize>,
+        exit_when_idle: ExitWhenIdle,
     ) -> Self {
         Self {
             connections: HashMap::new(),
@@ -42,6 +44,7 @@ impl App {
             clock: Instant::now(),
             presented_frames: 0,
             exit_after_frames,
+            exit_when_idle,
             finish_when_idle: false,
             saw_session: false,
             exit_code: 0,
@@ -260,10 +263,13 @@ impl App {
         if !self.connections.is_empty() || !self.renderer.is_empty() {
             return;
         }
-        if self.saw_session && self.exit_after_frames.is_some() && !self.finish_when_idle {
-            self.exit_code = 1;
+        if let Some(code) = idle_exit_code(
+            self.exit_when_idle,
+            self.saw_session && self.exit_after_frames.is_some() && !self.finish_when_idle,
+        ) {
+            self.exit_code = code;
+            event_loop.exit();
         }
-        event_loop.exit();
     }
 
     fn core_window(&self, id: NativeWindowId) -> Option<(SessionId, WindowId)> {
@@ -470,6 +476,13 @@ impl ApplicationHandler<SessionEvent> for App {
     }
 }
 
+fn idle_exit_code(exit_when_idle: ExitWhenIdle, unfinished_frame_limit: bool) -> Option<u8> {
+    let ExitWhenIdle::Yes = exit_when_idle else {
+        return None;
+    };
+    Some(u8::from(unfinished_frame_limit))
+}
+
 fn wayland_scale_from_factor(scale_factor: f64) -> i32 {
     if !scale_factor.is_finite() || scale_factor <= 0.0 {
         return 1;
@@ -480,6 +493,13 @@ fn wayland_scale_from_factor(scale_factor: f64) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_command_sessions_exit_when_the_last_window_closes() {
+        assert_eq!(idle_exit_code(ExitWhenIdle::No, false), None);
+        assert_eq!(idle_exit_code(ExitWhenIdle::Yes, false), Some(0));
+        assert_eq!(idle_exit_code(ExitWhenIdle::Yes, true), Some(1));
+    }
 
     #[test]
     fn converts_host_scale_factor_to_integer_wayland_scale() {
