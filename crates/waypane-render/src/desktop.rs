@@ -358,6 +358,12 @@ impl DesktopRenderer {
         self.presented.retain(|frame| frame.session != session);
     }
 
+    pub fn request_redraw(&self, id: winit::window::WindowId) {
+        if let Some(window) = self.windows.get(&id) {
+            window.window.request_redraw();
+        }
+    }
+
     pub fn scale_factor(&self, id: winit::window::WindowId) -> Option<f64> {
         self.windows
             .get(&id)

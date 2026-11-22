@@ -336,6 +336,12 @@ impl ApplicationHandler<SessionEvent> for App {
         let Some((session, core_id)) = self.core_window(id) else {
             return;
         };
+        if matches!(
+            event,
+            WindowEvent::Occluded(false) | WindowEvent::Focused(true)
+        ) {
+            self.renderer.request_redraw(id);
+        }
         let time = self.millis();
         let scale = self.renderer.scale_factor(id).unwrap_or(1.0);
         let Some(connection) = self.connections.get_mut(&session) else {
