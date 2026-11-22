@@ -299,8 +299,12 @@ impl Compositor {
                         height: window.geometry.height as u32,
                     })
                 });
-                if self.windows.contains_key(&new) {
-                    let _ = self.configure_window(new, size, vec![4]);
+                if self
+                    .windows
+                    .get(&new)
+                    .is_some_and(|window| matches!(window.kind, WindowKind::Toplevel))
+                {
+                    self.configure_window(new, size, vec![4])?;
                 }
             }
         }

@@ -695,6 +695,87 @@ fn configure_history_is_bounded_and_always_accepts_latest_serial() {
 }
 
 #[test]
+fn popup_native_resize_and_focus_do_not_reconfigure_popup() {
+    let mut fixture = Fixture::new();
+    replace_record(&mut fixture, 30, &xdg::XDG_SURFACE_INTERFACE);
+    replace_record(&mut fixture, 90, &xdg::XDG_POPUP_INTERFACE);
+    fixture.compositor.surfaces.insert(
+        40,
+        Surface {
+            role: Role::Popup(90),
+            window_id: Some(90),
+            ..Surface::default()
+        },
+    );
+    fixture.compositor.xdg_surfaces.insert(
+        30,
+        XdgSurface {
+            surface_id: 40,
+            window_id: Some(90),
+            ..XdgSurface::default()
+        },
+    );
+    let geometry = Rect {
+        x: 10,
+        y: 20,
+        width: 180,
+        height: 120,
+    };
+    fixture.compositor.windows.insert(
+        90,
+        Window {
+            id: 90,
+            xdg_surface_id: 30,
+            surface_id: 40,
+            kind: WindowKind::Popup { parent: 1 },
+            title: String::new(),
+            app_id: String::new(),
+            geometry,
+        },
+    );
+    fixture.compositor.keyboard_focus(Some(1)).unwrap();
+    fixture.compositor.take_outgoing();
+
+    let resized = configure_window_result(&mut fixture);
+    assert!(resized.is_ok(), "popup resize was rejected: {resized:?}");
+    for focused in [90, 1, 90] {
+        fixture.compositor.keyboard_focus(Some(focused)).unwrap();
+    }
+
+    let messages = outbound_messages(&mut fixture.compositor, &mut fixture.client);
+    assert!(
+        messages.iter().all(|message| {
+            message.object_id() != 90
+                || ![
+                    event_opcode(&xdg::XDG_POPUP_INTERFACE, "configure"),
+                    event_opcode(&xdg::XDG_TOPLEVEL_INTERFACE, "configure"),
+                ]
+                .contains(&message.opcode())
+        }),
+        "unexpected popup reconfiguration: {messages:?}"
+    );
+    assert!(fixture.compositor.xdg_surfaces[&30]
+        .pending_configures
+        .is_empty());
+    assert_eq!(fixture.compositor.windows[&90].geometry, geometry);
+    assert!(fixture
+        .compositor
+        .configure_window(999, None, vec![])
+        .is_err());
+}
+
+fn configure_window_result(fixture: &mut Fixture) -> Result<()> {
+    fixture.compositor.configure_window(
+        90,
+        Some(Size {
+            width: 640,
+            height: 480,
+        }),
+        vec![4],
+    )
+}
+
+#[test]
 fn queued_frame_keeps_its_shm_snapshot_after_diff_and_pool_close() {
     let mut fixture = Fixture::new();
     fixture

@@ -284,11 +284,12 @@ impl Compositor {
         size: Option<Size>,
         mut states: Vec<u32>,
     ) -> Result<()> {
-        if !matches!(
-            self.windows.get(&id).map(|window| window.kind),
-            Some(WindowKind::Toplevel)
-        ) {
-            return Err(Error::protocol(format!("unknown toplevel {id}")));
+        match self.windows.get(&id).map(|window| window.kind) {
+            Some(WindowKind::Toplevel) => {}
+            // Popup size is client-driven and already configured; host native resizes of a
+            // popup carry no xdg_toplevel.configure, rather than being a protocol error.
+            Some(WindowKind::Popup { .. }) => return Ok(()),
+            _ => return Err(Error::protocol(format!("unknown toplevel {id}"))),
         }
         if !states.contains(&4) && self.keyboard_focus == Some(id) {
             states.push(4);
