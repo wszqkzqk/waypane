@@ -156,8 +156,10 @@ gradle :app:assembleRelease
 
 APK versions come from git: `versionCode` is the commit count (`git rev-list --count HEAD`) and
 `versionName` is `git describe --tags --abbrev=12 --always` without the leading `v` (`-` becomes `.`,
-so `v0.2.0` builds `0.2.0` and untagged commits build `0.2.0.12.gabcdef123456` or a commit hash).
-Source archives without `.git` fall back to `1` / `0.1.0`.
+so `v0.1.0` builds `0.1.0`, commits after it build `0.1.0.12.gabcdef123456`, and builds before
+the first tag use a commit hash). Source archives without `.git` fall back to `1` / `0.1.0`.
+CI builds on `main` pushes, `v*` tags, pull requests, and manual runs, and prints the built APK's
+version in the Android job log.
 
 For a stable release signature, keep the keystore out of version control and set
 `WAYPANE_KEYSTORE_FILE`, `WAYPANE_KEYSTORE_PASSWORD`, `WAYPANE_KEY_ALIAS`, and
