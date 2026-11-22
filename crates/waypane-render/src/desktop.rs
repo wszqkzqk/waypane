@@ -36,6 +36,8 @@ struct NativeWindow {
     texture: Option<wgpu::Texture>,
     texture_size: waypane_core::Size,
     canvas: Canvas,
+    buffer_scale: i32,
+    straight_alpha: bool,
 }
 
 impl NativeWindow {
@@ -46,6 +48,7 @@ impl NativeWindow {
         instance: &wgpu::Instance,
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
+        alpha_mode: wgpu::CompositeAlphaMode,
     ) -> Result<Self, DesktopError> {
         let size = window.inner_size();
         let surface = instance
@@ -59,7 +62,7 @@ impl NativeWindow {
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::AutoVsync,
             desired_maximum_frame_latency: 2,
-            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            alpha_mode,
             view_formats: Vec::new(),
         };
         surface.configure(device, &config);
@@ -74,6 +77,8 @@ impl NativeWindow {
             texture: None,
             texture_size: waypane_core::Size::default(),
             canvas: Canvas::default(),
+            buffer_scale: 1,
+            straight_alpha: alpha_mode == wgpu::CompositeAlphaMode::PostMultiplied,
         })
     }
 
@@ -83,6 +88,9 @@ impl NativeWindow {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) -> Result<(), DesktopError> {
+        if let Some(buffer) = &frame.buffer {
+            self.buffer_scale = buffer.scale.max(1);
+        }
         let uploads = self.canvas.apply_frame(frame)?;
         let size = self.canvas.size();
         if size.width > 0 && size.height > 0 && self.texture_size != size {
@@ -105,8 +113,13 @@ impl NativeWindow {
         let Some(texture) = &self.texture else {
             return Ok(());
         };
-        for upload in uploads {
+        for mut upload in uploads {
             let rect = upload.rect;
+            if self.straight_alpha {
+                for pixel in upload.rgba.as_chunks_mut::<4>().0 {
+                    *pixel = to_straight_rgba(*pixel);
+                }
+            }
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture,
@@ -181,6 +194,7 @@ pub struct DesktopRenderer {
     device: Option<wgpu::Device>,
     queue: Option<wgpu::Queue>,
     format: Option<wgpu::TextureFormat>,
+    alpha_mode: Option<wgpu::CompositeAlphaMode>,
     windows: HashMap<winit::window::WindowId, NativeWindow>,
     ids: HashMap<(u64, WindowId), winit::window::WindowId>,
     pending_windows: HashMap<(u64, WindowId), (u64, WindowInfo)>,
@@ -263,6 +277,7 @@ impl DesktopRenderer {
                 self.instance.as_ref().unwrap(),
                 self.device.as_ref().unwrap(),
                 self.format.unwrap(),
+                self.alpha_mode.unwrap_or(wgpu::CompositeAlphaMode::Auto),
             )?;
             self.windows.insert(id, native);
             self.ids.insert((info_session, info.id), id);
@@ -356,6 +371,23 @@ impl DesktopRenderer {
             self.close_core_window(session, id);
         }
         self.presented.retain(|frame| frame.session != session);
+    }
+
+    /// Maps physical mouse coordinates onto the committed Wayland surface. The buffer's scale
+    /// and the actual drawable size matter, not only the host scale factor: remote surfaces can
+    /// use scale 1 on a Retina display or differ in size from the native window.
+    pub fn surface_point(
+        &self,
+        id: winit::window::WindowId,
+        position: PhysicalPosition<f64>,
+    ) -> Option<(f64, f64)> {
+        let native = self.windows.get(&id)?;
+        surface_point(
+            native.canvas.size(),
+            native.buffer_scale,
+            native.window.inner_size(),
+            position,
+        )
     }
 
     pub fn request_redraw(&self, id: winit::window::WindowId) {
@@ -457,11 +489,14 @@ impl DesktopRenderer {
             .formats
             .first()
             .ok_or_else(|| DesktopError::Gpu("surface reports no supported formats".to_string()))?;
+        let alpha_mode = surface_alpha_mode(&capabilities.alpha_modes);
         log::info!(
-            "GPU adapter: {} ({:?})",
+            "GPU adapter: {} ({:?}, alpha {:?})",
             adapter.get_info().name,
-            adapter.get_info().backend
+            adapter.get_info().backend,
+            alpha_mode
         );
+        self.alpha_mode = Some(alpha_mode);
         self.instance = Some(instance);
         self.device = Some(device);
         self.queue = Some(queue);
@@ -488,6 +523,7 @@ fn window_attributes(
     let popup = matches!(info.kind, WindowKind::Popup { .. });
     let attributes = Window::default_attributes()
         .with_title(window_title(&info.title, &info.app_id))
+        .with_transparent(true)
         .with_inner_size(LogicalSize::new(
             f64::from(size.width.max(1)),
             f64::from(size.height.max(1)),
@@ -502,5 +538,112 @@ fn window_attributes(
     match position {
         Some(position) => attributes.with_position(position),
         None => attributes,
+    }
+}
+
+/// Transparency requires a non-opaque surface. Metal advertises only Opaque/PostMultiplied and
+/// only makes its layer non-opaque for PostMultiplied; elsewhere premultiplied may be offered.
+/// With Auto (neither supported) shadows still show the opaque background.
+fn surface_alpha_mode(supported: &[wgpu::CompositeAlphaMode]) -> wgpu::CompositeAlphaMode {
+    if supported.contains(&wgpu::CompositeAlphaMode::PostMultiplied) {
+        wgpu::CompositeAlphaMode::PostMultiplied
+    } else if supported.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
+        wgpu::CompositeAlphaMode::PreMultiplied
+    } else {
+        wgpu::CompositeAlphaMode::Auto
+    }
+}
+
+/// The canvas composites premultiplied rgb; PostMultiplied surfaces need straight rgb.
+fn to_straight_rgba([r, g, b, a]: [u8; 4]) -> [u8; 4] {
+    if a == 0 {
+        return [0; 4];
+    }
+    if a == 255 {
+        return [r, g, b, a];
+    }
+    let straight =
+        |channel: u8| ((u32::from(channel) * 255 + u32::from(a) / 2) / u32::from(a)).min(255) as u8;
+    [straight(r), straight(g), straight(b), a]
+}
+
+fn surface_point(
+    pixels: waypane_core::Size,
+    buffer_scale: i32,
+    drawable: winit::dpi::PhysicalSize<u32>,
+    position: PhysicalPosition<f64>,
+) -> Option<(f64, f64)> {
+    if drawable.width == 0 || drawable.height == 0 {
+        return None;
+    }
+    let scale = f64::from(buffer_scale.max(1));
+    let logical = waypane_core::Size {
+        width: (f64::from(pixels.width) / scale).round().max(1.0) as u32,
+        height: (f64::from(pixels.height) / scale).round().max(1.0) as u32,
+    };
+    Some((
+        position.x * f64::from(logical.width) / f64::from(drawable.width),
+        position.y * f64::from(logical.height) / f64::from(drawable.height),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use winit::dpi::PhysicalSize;
+
+    fn size(width: u32, height: u32) -> waypane_core::Size {
+        waypane_core::Size { width, height }
+    }
+
+    #[test]
+    fn selects_a_surface_alpha_mode_supported_by_the_adapter() {
+        use wgpu::CompositeAlphaMode::*;
+        assert_eq!(
+            surface_alpha_mode(&[Opaque, PostMultiplied]),
+            PostMultiplied
+        );
+        assert_eq!(surface_alpha_mode(&[Opaque, PreMultiplied]), PreMultiplied);
+        assert_eq!(surface_alpha_mode(&[Opaque]), Auto);
+    }
+
+    #[test]
+    fn converts_premultiplied_rgba_for_straight_alpha_surfaces() {
+        assert_eq!(to_straight_rgba([64, 0, 32, 128]), [128, 0, 64, 128]);
+        assert_eq!(to_straight_rgba([12, 34, 56, 0]), [0, 0, 0, 0]);
+        assert_eq!(to_straight_rgba([12, 34, 56, 255]), [12, 34, 56, 255]);
+        assert_eq!(to_straight_rgba([255, 200, 100, 128]), [255, 255, 199, 128]);
+    }
+
+    #[test]
+    fn pointer_uses_buffer_scale_and_actual_drawable_size() {
+        let drawable = PhysicalSize::new(2200, 1474);
+        assert_eq!(
+            surface_point(
+                size(1100, 737),
+                1,
+                drawable,
+                PhysicalPosition::new(2200.0, 1474.0)
+            ),
+            Some((1100.0, 737.0))
+        );
+        assert_eq!(
+            surface_point(
+                size(2200, 1474),
+                2,
+                drawable,
+                PhysicalPosition::new(1100.0, 737.0)
+            ),
+            Some((550.0, 368.5))
+        );
+        assert_eq!(
+            surface_point(
+                size(1100, 737),
+                1,
+                PhysicalSize::new(0, 0),
+                PhysicalPosition::new(1.0, 1.0)
+            ),
+            None
+        );
     }
 }

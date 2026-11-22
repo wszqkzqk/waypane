@@ -371,9 +371,14 @@ impl ApplicationHandler<SessionEvent> for App {
             WindowEvent::Focused(focused) => connection
                 .compositor_mut()
                 .keyboard_focus(focused.then_some(core_id)),
-            WindowEvent::CursorMoved { position, .. } => connection
-                .compositor_mut()
-                .pointer_motion(core_id, position.x / scale, position.y / scale, time),
+            WindowEvent::CursorMoved { position, .. } => self
+                .renderer
+                .surface_point(id, position)
+                .map_or(Ok(()), |(x, y)| {
+                    connection
+                        .compositor_mut()
+                        .pointer_motion(core_id, x, y, time)
+                }),
             WindowEvent::CursorLeft { .. } => {
                 connection.compositor_mut().pointer_focus(None, 0.0, 0.0)
             }

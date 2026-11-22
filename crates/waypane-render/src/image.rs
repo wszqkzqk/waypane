@@ -377,7 +377,8 @@ fn blend_region(canvas: &mut [u8], rect: Rect, layer: &Layer) {
                     + u32::from(canvas[dst + channel]) * inverse;
                 canvas[dst + channel] = (value / 255) as u8;
             }
-            canvas[dst + 3] = canvas[dst + 3].max(layer.rgba[src + 3]);
+            let background_alpha = u32::from(canvas[dst + 3]);
+            canvas[dst + 3] = ((background_alpha * inverse + 255 * alpha) / 255) as u8;
         }
     }
 }
@@ -459,6 +460,31 @@ mod tests {
             buffer: Some(buffer),
             z_order: None,
         }
+    }
+
+    #[test]
+    fn overlapping_translucent_layers_use_source_over_alpha() {
+        let mut canvas = Canvas::default();
+        let mut bottom = view(1, 1, 0);
+        bottom.damage = vec![Rect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        }];
+        bottom.data = vec![0_u8, 0, 255, 128].into();
+        canvas.apply_frame(&frame(1, bottom.clone(), None)).unwrap();
+        let mut top = bottom;
+        top.data = vec![255_u8, 0, 0, 128].into();
+        canvas
+            .apply_frame(&frame(2, top, Some((1, Point { x: 0, y: 0 }))))
+            .unwrap();
+        let pixel = &canvas.rgba()[..4];
+        assert_eq!(pixel[3], 191, "source-over alpha of two 128/255 layers");
+        assert!(
+            pixel[0].abs_diff(63) <= 1 && pixel[2].abs_diff(128) <= 1,
+            "premultiplied rgb: {pixel:?}"
+        );
     }
 
     #[test]
