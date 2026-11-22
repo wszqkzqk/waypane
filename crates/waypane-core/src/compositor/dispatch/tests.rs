@@ -420,7 +420,7 @@ fn allows_empty_initial_commit_before_xdg_ack_configure() {
     {
         let xdg = fixture.compositor.xdg_surfaces.get_mut(&20).unwrap();
         xdg.initial_ack_seen = false;
-        xdg.configure_serial = Some(777);
+        xdg.record_configure(777, None);
     }
 
     fixture
@@ -459,6 +459,239 @@ fn allows_empty_initial_commit_before_xdg_ack_configure() {
         "{error}"
     );
     assert!(!fixture.compositor.xdg_surfaces[&20].initial_ack_seen);
+}
+
+fn latest_configure_serial(xdg: &XdgSurface) -> Option<u32> {
+    xdg.pending_configures.back().map(|pending| pending.serial)
+}
+
+fn ack_configure(fixture: &mut Fixture, surface: u32, serial: u32) -> Result<()> {
+    fixture.compositor.dispatch(
+        &mut fixture.client,
+        &request(
+            surface,
+            &xdg::XDG_SURFACE_INTERFACE,
+            "ack_configure",
+            6,
+            vec![Value::Uint(serial)],
+        ),
+        ObjectKind::XdgSurface,
+    )
+}
+
+#[test]
+fn initial_ack_after_newer_configure_allows_first_buffer() {
+    let mut fixture = Fixture::new();
+    fixture
+        .compositor
+        .xdg_surfaces
+        .get_mut(&20)
+        .unwrap()
+        .initial_ack_seen = false;
+    fixture
+        .compositor
+        .configure_window(1, None, vec![4])
+        .unwrap();
+    let initial = latest_configure_serial(&fixture.compositor.xdg_surfaces[&20]).unwrap();
+    fixture
+        .compositor
+        .configure_window(1, None, vec![4])
+        .unwrap();
+    let newer = latest_configure_serial(&fixture.compositor.xdg_surfaces[&20]).unwrap();
+    assert_ne!(initial, newer);
+
+    ack_configure(&mut fixture, 20, initial).unwrap();
+    assert!(fixture.compositor.xdg_surfaces[&20].initial_ack_seen);
+    assert_eq!(
+        latest_configure_serial(&fixture.compositor.xdg_surfaces[&20]),
+        Some(newer)
+    );
+    fixture
+        .compositor
+        .surfaces
+        .get_mut(&10)
+        .unwrap()
+        .pending
+        .attach = Some(Some(51));
+    fixture
+        .compositor
+        .commit_surface(&mut fixture.client, 10)
+        .unwrap();
+    let events = fixture.compositor.take_events();
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, CoreEvent::Frame(_))));
+}
+
+#[test]
+fn configure_acks_consume_earlier_serials_and_reject_invalid_ones() {
+    let mut fixture = Fixture::new();
+    fixture
+        .compositor
+        .configure_window(1, None, vec![])
+        .unwrap();
+    let first = latest_configure_serial(&fixture.compositor.xdg_surfaces[&20]).unwrap();
+    let other_object_serial = fixture.compositor.next_serial();
+    fixture
+        .compositor
+        .configure_window(1, None, vec![4])
+        .unwrap();
+    let second = latest_configure_serial(&fixture.compositor.xdg_surfaces[&20]).unwrap();
+    fixture
+        .compositor
+        .configure_window(1, None, vec![])
+        .unwrap();
+    let third = latest_configure_serial(&fixture.compositor.xdg_surfaces[&20]).unwrap();
+
+    for serial in [u32::MAX, other_object_serial] {
+        let error = ack_configure(&mut fixture, 20, serial)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("ack_configure"), "{error}");
+    }
+    ack_configure(&mut fixture, 20, second).unwrap();
+    assert_eq!(
+        latest_configure_serial(&fixture.compositor.xdg_surfaces[&20]),
+        Some(third)
+    );
+    for serial in [second, first] {
+        let error = ack_configure(&mut fixture, 20, serial)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("already consumed"), "{error}");
+    }
+    ack_configure(&mut fixture, 20, third).unwrap();
+    assert_eq!(
+        latest_configure_serial(&fixture.compositor.xdg_surfaces[&20]),
+        None
+    );
+}
+
+#[test]
+fn popup_ack_applies_geometry_of_the_acknowledged_configure() {
+    let mut fixture = Fixture::new();
+    fixture.compositor.windows.get_mut(&1).unwrap().geometry = Rect {
+        x: 0,
+        y: 0,
+        width: 500,
+        height: 300,
+    };
+    fixture
+        .compositor
+        .surfaces
+        .get_mut(&10)
+        .unwrap()
+        .logical_size = Size {
+        width: 500,
+        height: 300,
+    };
+    replace_record(&mut fixture, 30, &xdg::XDG_SURFACE_INTERFACE);
+    replace_record(&mut fixture, 40, &wl::WL_SURFACE_INTERFACE);
+    replace_record(&mut fixture, 41, &xdg::XDG_POSITIONER_INTERFACE);
+    replace_record(&mut fixture, 90, &xdg::XDG_POPUP_INTERFACE);
+    fixture.compositor.surfaces.insert(
+        40,
+        Surface {
+            role: Role::Popup(90),
+            window_id: Some(90),
+            ..Surface::default()
+        },
+    );
+    fixture.compositor.xdg_surfaces.insert(
+        30,
+        XdgSurface {
+            surface_id: 40,
+            window_id: Some(90),
+            ..XdgSurface::default()
+        },
+    );
+    fixture.compositor.windows.insert(
+        90,
+        Window {
+            id: 90,
+            xdg_surface_id: 30,
+            surface_id: 40,
+            kind: WindowKind::Popup { parent: 1 },
+            title: String::new(),
+            app_id: String::new(),
+            geometry: Rect::default(),
+        },
+    );
+
+    let geometries = [
+        Rect {
+            x: 10,
+            y: 20,
+            width: 100,
+            height: 50,
+        },
+        Rect {
+            x: 15,
+            y: 25,
+            width: 80,
+            height: 40,
+        },
+    ];
+    let mut serials = Vec::new();
+    for (token, geometry) in (7_u32..).zip(geometries) {
+        fixture.compositor.positioners.insert(
+            41,
+            Positioner {
+                size: Some((geometry.width, geometry.height)),
+                anchor_rect: Some(Rect {
+                    x: geometry.x,
+                    y: geometry.y,
+                    width: geometry.width,
+                    height: geometry.height,
+                }),
+                ..Positioner::default()
+            },
+        );
+        fixture
+            .compositor
+            .dispatch(
+                &mut fixture.client,
+                &request(
+                    90,
+                    &xdg::XDG_POPUP_INTERFACE,
+                    "reposition",
+                    3,
+                    vec![Value::Object(Some(41)), Value::Uint(token)],
+                ),
+                ObjectKind::XdgPopup,
+            )
+            .unwrap();
+        serials.push(latest_configure_serial(&fixture.compositor.xdg_surfaces[&30]).unwrap());
+    }
+
+    ack_configure(&mut fixture, 30, serials[0]).unwrap();
+    assert_eq!(fixture.compositor.windows[&90].geometry, geometries[0]);
+    ack_configure(&mut fixture, 30, serials[1]).unwrap();
+    assert_eq!(fixture.compositor.windows[&90].geometry, geometries[1]);
+    assert!(fixture
+        .compositor
+        .take_events()
+        .iter()
+        .any(|event| matches!(event, CoreEvent::WindowMetadata { id: 90, geometry, .. } if *geometry == geometries[1])));
+}
+
+#[test]
+fn configure_history_is_bounded_and_always_accepts_latest_serial() {
+    let mut fixture = Fixture::new();
+    for _ in 0..100 {
+        fixture
+            .compositor
+            .configure_window(1, None, vec![])
+            .unwrap();
+    }
+    let xdg = &mut fixture.compositor.xdg_surfaces.get_mut(&20).unwrap();
+    assert_eq!(xdg.pending_configures.len(), 64);
+    let latest = latest_configure_serial(xdg).unwrap();
+    ack_configure(&mut fixture, 20, latest).unwrap();
+    assert_eq!(
+        latest_configure_serial(&fixture.compositor.xdg_surfaces[&20]),
+        None
+    );
 }
 
 #[test]
@@ -927,12 +1160,13 @@ fn configures_repositions_and_grabs_popups() {
     };
     assert_eq!(fixture.compositor.windows[&90].geometry, flipped);
     assert_eq!(
-        fixture.compositor.xdg_surfaces[&30].pending_geometry,
+        fixture.compositor.xdg_surfaces[&30]
+            .pending_configures
+            .back()
+            .and_then(|pending| pending.geometry),
         Some(flipped)
     );
-    let serial = fixture.compositor.xdg_surfaces[&30]
-        .configure_serial
-        .unwrap();
+    let serial = latest_configure_serial(&fixture.compositor.xdg_surfaces[&30]).unwrap();
     fixture
         .compositor
         .dispatch(
@@ -947,7 +1181,10 @@ fn configures_repositions_and_grabs_popups() {
             ObjectKind::XdgSurface,
         )
         .unwrap();
-    assert_eq!(fixture.compositor.xdg_surfaces[&30].configure_serial, None);
+    assert_eq!(
+        latest_configure_serial(&fixture.compositor.xdg_surfaces[&30]),
+        None
+    );
     assert!(fixture
         .compositor
         .dispatch(
@@ -1001,7 +1238,10 @@ fn configures_repositions_and_grabs_popups() {
     };
     assert_eq!(fixture.compositor.windows[&90].geometry, flipped);
     assert_eq!(
-        fixture.compositor.xdg_surfaces[&30].pending_geometry,
+        fixture.compositor.xdg_surfaces[&30]
+            .pending_configures
+            .back()
+            .and_then(|pending| pending.geometry),
         Some(resized)
     );
     let messages = outbound_messages(&mut fixture.compositor, &mut fixture.client);
@@ -1085,12 +1325,13 @@ fn configures_repositions_and_grabs_popups() {
         height: 50,
     };
     assert_eq!(
-        fixture.compositor.xdg_surfaces[&30].pending_geometry,
+        fixture.compositor.xdg_surfaces[&30]
+            .pending_configures
+            .back()
+            .and_then(|pending| pending.geometry),
         Some(reactive)
     );
-    let serial = fixture.compositor.xdg_surfaces[&30]
-        .configure_serial
-        .unwrap();
+    let serial = latest_configure_serial(&fixture.compositor.xdg_surfaces[&30]).unwrap();
     fixture
         .compositor
         .dispatch(
@@ -1208,9 +1449,7 @@ fn enforces_toplevel_size_limits_and_unacknowledged_serials() {
             height: 600
         })
     );
-    let serial = fixture.compositor.xdg_surfaces[&20]
-        .configure_serial
-        .unwrap();
+    let serial = latest_configure_serial(&fixture.compositor.xdg_surfaces[&20]).unwrap();
     fixture
         .compositor
         .dispatch(

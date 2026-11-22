@@ -1,8 +1,9 @@
-use crate::wayland_backend::protocol::Interface;
-use waypipe_client::Rid;
+use std::collections::VecDeque;
 
 use crate::protocol::interface_by_name;
 use crate::types::{Point, Rect, ShmFormat, SurfaceId, WindowId, WindowKind};
+use crate::wayland_backend::protocol::Interface;
+use waypipe_client::Rid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ObjectKind {
@@ -397,13 +398,30 @@ impl Buffer {
 pub(crate) struct XdgSurface {
     pub surface_id: u32,
     pub window_id: Option<WindowId>,
-    pub pending_geometry: Option<Rect>,
-    pub configure_serial: Option<u32>,
+    pub pending_configures: VecDeque<PendingConfigure>,
     pub initial_ack_seen: bool,
     pub configured_size: Option<crate::types::Size>,
     pub configured_states: Vec<u32>,
     pub min_size: crate::types::Size,
     pub max_size: crate::types::Size,
+}
+
+impl XdgSurface {
+    pub(crate) fn record_configure(&mut self, serial: u32, geometry: Option<Rect>) {
+        const MAX_PENDING_CONFIGURES: usize = 64;
+
+        if self.pending_configures.len() == MAX_PENDING_CONFIGURES {
+            self.pending_configures.pop_front();
+        }
+        self.pending_configures
+            .push_back(PendingConfigure { serial, geometry });
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PendingConfigure {
+    pub serial: u32,
+    pub geometry: Option<Rect>,
 }
 
 #[derive(Debug)]

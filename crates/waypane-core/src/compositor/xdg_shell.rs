@@ -204,15 +204,20 @@ impl Compositor {
                 .xdg_surfaces
                 .get_mut(&request.object_id)
                 .ok_or_else(|| bad(request, "unknown xdg_surface"))?;
-            if xdg.configure_serial != Some(serial) {
+            let Some(index) = xdg
+                .pending_configures
+                .iter()
+                .position(|pending| pending.serial == serial)
+            else {
                 return Err(bad(
                     request,
-                    "ack_configure does not match the latest unacknowledged serial",
+                    "ack_configure references a serial that was never sent or was already consumed",
                 ));
-            }
-            xdg.configure_serial = None;
+            };
+            let geometry = xdg.pending_configures[index].geometry;
+            xdg.pending_configures.drain(..=index);
             xdg.initial_ack_seen = true;
-            (xdg.window_id, xdg.pending_geometry.take())
+            (xdg.window_id, geometry)
         };
         if let (Some(window_id), Some(geometry)) = (window_id, geometry) {
             let window = self
@@ -296,7 +301,7 @@ impl Compositor {
                 .find(|surface| surface.window_id == Some(id))
                 .ok_or_else(|| Error::protocol(format!("unknown xdg_surface for window {id}")))?;
             let size = size.map(|size| constrain_size(size, xdg.min_size, xdg.max_size));
-            xdg.configure_serial = Some(serial);
+            xdg.record_configure(serial, None);
             xdg.configured_size = size;
             xdg.configured_states = states.clone();
             (self.windows[&id].xdg_surface_id, size)
@@ -324,8 +329,7 @@ impl Compositor {
     ) {
         let serial = self.next_serial();
         if let Some(xdg) = self.xdg_surfaces.get_mut(&xdg_surface) {
-            xdg.configure_serial = Some(serial);
-            xdg.pending_geometry = Some(geometry);
+            xdg.record_configure(serial, Some(geometry));
         }
         if let Some(token) = token {
             self.emit(

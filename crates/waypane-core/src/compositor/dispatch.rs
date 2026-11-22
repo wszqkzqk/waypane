@@ -425,7 +425,7 @@ impl Compositor {
                 self.xdg_surfaces
                     .get_mut(&request.object_id)
                     .unwrap()
-                    .configure_serial = Some(serial);
+                    .record_configure(serial, None);
                 self.send_configure(id, request.object_id, None, &[], serial);
                 let info = self.window_info(id).unwrap();
                 self.events.push(CoreEvent::WindowCreated(info));
@@ -788,7 +788,7 @@ impl Compositor {
                 .values()
                 .find(|xdg| xdg.surface_id == surface_id && xdg.window_id.is_some())
             {
-                if xdg_surface.configure_serial.is_some() && !xdg_surface.initial_ack_seen {
+                if !xdg_surface.initial_ack_seen {
                     return Err(Error::protocol(
                         "xdg_surface attached a buffer before initial ack_configure",
                     ));
