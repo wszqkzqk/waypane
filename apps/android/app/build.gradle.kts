@@ -1,8 +1,23 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.serialization")
 }
+
+val localSigningProperties = Properties().apply {
+    val propertiesFile = rootDir.resolve("signing/keystore.properties")
+    if (propertiesFile.isFile) {
+        propertiesFile.inputStream().use { load(it) }
+    }
+}
+
+fun signingSetting(environmentName: String, propertyName: String): String? =
+    System.getenv(environmentName)?.takeIf { it.isNotBlank() }
+        ?: localSigningProperties.getProperty(propertyName)?.takeIf { it.isNotBlank() }
+
+val releaseKeystoreFile = signingSetting("WAYPANE_KEYSTORE_FILE", "storeFile")
 
 val rustJniLibs = layout.buildDirectory.dir("rustJniLibs")
 val rustCrateDir = rootDir.resolve("../../crates/waypane-android").normalize()
@@ -56,10 +71,26 @@ android {
         buildConfig = false
     }
 
+    signingConfigs {
+        create("release") {
+            if (!releaseKeystoreFile.isNullOrBlank()) {
+                storeFile = file(releaseKeystoreFile)
+                storePassword = signingSetting("WAYPANE_KEYSTORE_PASSWORD", "storePassword")
+                keyAlias = signingSetting("WAYPANE_KEY_ALIAS", "keyAlias")
+                keyPassword = signingSetting("WAYPANE_KEY_PASSWORD", "keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            signingConfig = if (releaseKeystoreFile.isNullOrBlank()) {
+                signingConfigs.getByName("debug")
+            } else {
+                signingConfigs.getByName("release")
+            }
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }

@@ -131,10 +131,10 @@ If Android reclaims the process, reconnect the session.
 ## Downloads
 
 Recent [CI runs](https://github.com/wszqkzqk/waypane/actions/workflows/build.yml) on `main` upload
-these debug artifacts:
+these artifacts:
 
-- `waypane-android-debug-arm64`: arm64 APK (`minSdk 26`), installable in place with
-  `adb install -r app-debug.apk`
+- `waypane-android-release-arm64`: arm64 APK (`minSdk 26`), installable in place with
+  `adb install -r app-release.apk`
 - `waypane-desktop-macOS-ARM64`
 - `waypane-desktop-Windows-X64`
 
@@ -154,7 +154,19 @@ Android builds additionally need an Android SDK/NDK, JDK, Gradle, `cargo-ndk`, t
 cd apps/android
 gradle :app:assembleDebug
 # app/build/outputs/apk/debug/app-debug.apk
+gradle :app:assembleRelease
+# app/build/outputs/apk/release/app-release.apk
 ```
+
+For a stable release signature, keep the keystore out of version control and set
+`WAYPANE_KEYSTORE_FILE`, `WAYPANE_KEYSTORE_PASSWORD`, `WAYPANE_KEY_ALIAS`, and
+`WAYPANE_KEY_PASSWORD` before running `assembleRelease`. Local builds can instead load `storeFile`,
+`storePassword`, `keyAlias`, and `keyPassword` from `apps/android/signing/keystore.properties`;
+environment variables take precedence. CI reads the same values from repository secrets, with the
+keystore itself supplied as `WAYPANE_KEYSTORE_BASE64` (for example, the output of
+`base64 -w 0 waypane-release.keystore`). All four secrets must be set. Without them, release builds
+fall back to debug signing so that local builds and fork pull requests still work; these fallback
+signatures are not stable across machines.
 
 CI runs all platform builds and the upstream Waypipe interoperability tests on hosted runners; see
 [`.github/workflows/build.yml`](.github/workflows/build.yml) for the current commands and toolchain

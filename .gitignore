@@ -2,4 +2,7 @@
 .xwin-cache
 **/*.rs.bk
 *.log
+*.jks
+*.keystore
+/apps/android/signing/
 .DS_Store

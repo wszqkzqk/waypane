@@ -173,25 +173,36 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: android-aarch64
-      - name: Restore persistent CI debug signing key
-        if: github.event_name != 'pull_request'
-        uses: actions/cache@v6
-        with:
-          path: /home/runner/.android/debug.keystore
-          key: waypane-android-ci-debug-signing-v1
-      - name: Build debug APK with the runner's latest NDK
+      - name: Decode release keystore
+        env:
+          WAYPANE_KEYSTORE_BASE64: ${{ secrets.WAYPANE_KEYSTORE_BASE64 }}
+          WAYPANE_KEYSTORE_PASSWORD: ${{ secrets.WAYPANE_KEYSTORE_PASSWORD }}
+          WAYPANE_KEY_ALIAS: ${{ secrets.WAYPANE_KEY_ALIAS }}
+          WAYPANE_KEY_PASSWORD: ${{ secrets.WAYPANE_KEY_PASSWORD }}
+        run: |
+          # Secrets are empty on fork PRs; the build then falls back to debug signing.
+          if [ -n "$WAYPANE_KEYSTORE_BASE64" ] && [ -n "$WAYPANE_KEYSTORE_PASSWORD" ] && [ -n "$WAYPANE_KEY_ALIAS" ] && [ -n "$WAYPANE_KEY_PASSWORD" ]; then
+            printf '%s' "$WAYPANE_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/waypane-release.keystore"
+            chmod 600 "$RUNNER_TEMP/waypane-release.keystore"
+            echo "WAYPANE_KEYSTORE_FILE=$RUNNER_TEMP/waypane-release.keystore" >> "$GITHUB_ENV"
+          fi
+      - name: Build release APK with the runner's latest NDK
         working-directory: apps/android
+        env:
+          WAYPANE_KEYSTORE_PASSWORD: ${{ secrets.WAYPANE_KEYSTORE_PASSWORD }}
+          WAYPANE_KEY_ALIAS: ${{ secrets.WAYPANE_KEY_ALIAS }}
+          WAYPANE_KEY_PASSWORD: ${{ secrets.WAYPANE_KEY_PASSWORD }}
         run: |
           test -n "${ANDROID_NDK_LATEST_HOME:-}"
           export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           export ANDROID_NDK_ROOT="$ANDROID_NDK_LATEST_HOME"
           cargo ndk --version
           grep '^Pkg.Revision' "$ANDROID_NDK_HOME/source.properties"
-          gradle --no-daemon --stacktrace :app:assembleDebug
-      - name: Upload debug APK
+          gradle --no-daemon --stacktrace :app:assembleRelease
+      - name: Upload release APK
         uses: actions/upload-artifact@v7
         with:
-          name: waypane-android-debug-arm64
-          path: apps/android/app/build/outputs/apk/debug/app-debug.apk
+          name: waypane-android-release-arm64
+          path: apps/android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
           retention-days: 14
