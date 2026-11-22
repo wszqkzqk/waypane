@@ -1253,6 +1253,16 @@ impl Compositor {
         Ok(id)
     }
 
+    #[cfg(test)]
+    pub(crate) fn insert_test_record(&mut self, id: u32, record: ObjectRecord) -> Result<()> {
+        self.insert_record(id, record)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pool_rid(&self, id: u32) -> Option<Rid> {
+        self.pools.get(&id).map(|pool| pool.rid)
+    }
+
     fn insert_record(&mut self, id: u32, record: ObjectRecord) -> Result<()> {
         if id == 0 || id >= 0xff00_0000 {
             return Err(Error::protocol(format!("invalid client object id {id}")));
