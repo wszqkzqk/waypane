@@ -193,7 +193,10 @@ setup.
 
 Reusable code lives in `crates/` (`waypipe-client`, `waypane-core`, `waypane-transport`,
 `waypane-render`, `waypane-android`), and native hosts in `apps/`. Upstream Waypipe 0.11.3 in
-`vendor/waypipe` is the protocol reference and interoperability-test peer.
+`vendor/waypipe` is the protocol reference and interoperability-test peer, kept as a read-only
+git subtree of the release recorded in `vendor/waypipe.upstream.toml` (see `vendor/README.md`).
+CI verifies that copy and tests against upstream; a scheduled workflow opens an upgrade PR when
+Waypipe publishes a new release.
 
 ```sh
 cargo fmt --all --check

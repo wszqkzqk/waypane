@@ -93,15 +93,9 @@ jobs:
             libzstd-dev \
             openssh-server \
             pkg-config
-      - name: Build upstream Waypipe without GPU or video
-        env:
-          WAYPIPE_VERSION: |-
-            waypipe 0.11.3
-            features:
-              lz4: true
-              zstd: true
-              dmabuf: false
-              video: false
+      - name: Verify vendored Waypipe matches upstream
+        run: scripts/waypipe-upstream.sh verify
+      - name: Build vendored upstream Waypipe without GPU or video
         run: |
           cargo build \
             --manifest-path vendor/waypipe/Cargo.toml \
@@ -111,15 +105,20 @@ jobs:
             --features lz4,zstd \
             --bin waypipe \
             --target-dir target/upstream-waypipe
-          target/upstream-waypipe/release/waypipe --version
+          binary="$PWD/target/upstream-waypipe/release/waypipe"
+          echo "WAYPIPE_TEST_BINARY=$binary" >> "$GITHUB_ENV"
+          { echo 'WAYPIPE_VERSION<<EOF'; "$binary" --version; echo EOF; } >> "$GITHUB_ENV"
+          "$binary" --version
+      - name: Resolve newest upstream baseline
+        id: upstream-baselines
+        run: |
+          newer=$(python3 -c "import tomllib; m=tomllib.load(open('vendor/waypipe.upstream.toml','rb')); print(str(m['latest_commit'] != m['commit']).lower())")
+          echo "has_latest=$newer" >> "$GITHUB_OUTPUT"
       - name: Test wire protocol, SHM, files, and compression
         env:
-          WAYPIPE_TEST_BINARY: ${{ github.workspace }}/target/upstream-waypipe/release/waypipe
           WAYPIPE_TEST_COMPRESSIONS: none,lz4,zstd
         run: cargo test -p waypipe-client --locked --test upstream_shm -- --ignored --nocapture
       - name: Test clipboard, text input, and toplevel protocols
-        env:
-          WAYPIPE_TEST_BINARY: ${{ github.workspace }}/target/upstream-waypipe/release/waypipe
         run: |
           cargo test -p waypane-core --locked \
             --test upstream_clipboard \
@@ -128,7 +127,6 @@ jobs:
             -- --ignored --nocapture
       - name: Test real SSH, TOFU, encrypted keys, and Termux TMPDIR
         env:
-          WAYPIPE_TEST_BINARY: ${{ github.workspace }}/target/upstream-waypipe/release/waypipe
           WAYPIPE_SSHD: /usr/sbin/sshd
         run: |
           sudo mkdir -p /run/sshd
@@ -136,6 +134,31 @@ jobs:
           sudo mkdir -p /data/data/com.termux/files/usr/tmp
           sudo chown -R "$(id -u):$(id -g)" /data/data/com.termux
           cargo test -p waypane-core --locked --test upstream_ssh -- --ignored --nocapture
+      - name: Test against newest upstream release
+        if: steps.upstream-baselines.outputs.has_latest == 'true'
+        env:
+          WAYPIPE_SSHD: /usr/sbin/sshd
+        run: |
+          set -euo pipefail
+          read -r latest_tag latest_commit < <(python3 -c "import tomllib; m=tomllib.load(open('vendor/waypipe.upstream.toml','rb')); print(m['latest_tag'], m['latest_commit'])")
+          scripts/waypipe-upstream.sh export "$latest_tag" "$latest_commit" target/upstream-latest-src
+          cargo build \
+            --manifest-path target/upstream-latest-src/Cargo.toml \
+            --locked \
+            --release \
+            --no-default-features \
+            --features lz4,zstd \
+            --bin waypipe \
+            --target-dir target/upstream-latest
+          latest="$PWD/target/upstream-latest/release/waypipe"
+          { echo 'WAYPIPE_VERSION<<EOF'; "$latest" --version; echo EOF; } >> "$GITHUB_ENV"
+          WAYPIPE_TEST_BINARY="$latest" WAYPIPE_TEST_COMPRESSIONS=none,lz4,zstd cargo test -p waypipe-client --locked --test upstream_shm -- --ignored --nocapture
+          WAYPIPE_TEST_BINARY="$latest" cargo test -p waypane-core --locked --test upstream_clipboard --test upstream_text_input --test upstream_toplevel -- --ignored --nocapture
+          sudo mkdir -p /run/sshd
+          sudo chmod 0755 /run/sshd
+          sudo mkdir -p /data/data/com.termux/files/usr/tmp
+          sudo chown -R "$(id -u):$(id -g)" /data/data/com.termux
+          WAYPIPE_TEST_BINARY="$latest" cargo test -p waypane-core --locked --test upstream_ssh -- --ignored --nocapture
 
   android:
     name: Android APK

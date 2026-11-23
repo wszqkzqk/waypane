@@ -137,6 +137,7 @@ case "${1:-}" in
         read -r newest newest_commit <<< "$found"
         available=false
         if version_gt "$newest" "$latest_tag"; then available=true; fi
+        output current_tag "$tag"
         output latest_tag "$newest"
         output latest_commit "$newest_commit"
         output update_available "$available"
@@ -162,7 +163,8 @@ case "${1:-}" in
         echo "$prefix matches upstream $tag ($oid)"
         ;;
     export)
-        [ $# = 3 ] && valid_tag "$2" || { echo "usage: $0 export TAG COMMIT DIRECTORY (empty or missing)" >&2; exit 2; }
+        [ $# = 4 ] && valid_tag "$2" && [[ "$3" =~ ^[0-9a-f]{40}$ ]] ||
+            { echo "usage: $0 export TAG COMMIT DIRECTORY (empty or missing)" >&2; exit 2; }
         [ ! -e "$3" ] || [ -z "$(ls -A "$3")" ] || { echo "$3 is not empty" >&2; exit 1; }
         oid=$(fetch_tag "$2" "$3")
         archive_commit "$oid" "$4"
