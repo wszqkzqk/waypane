@@ -246,6 +246,9 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ github.ref_name }}
     steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # gh --verify-tag and --generate-notes need git history and tags.
       - uses: actions/download-artifact@v7
         with:
           path: target/dist
