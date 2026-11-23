@@ -45,7 +45,11 @@ impl Drop for TempRuntime {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Interface {
     Registry,
+    Compositor,
+    Surface,
+    Buffer,
     Shm,
+    ShmPool,
     Seat,
     Keyboard,
     Callback,
@@ -97,10 +101,18 @@ fn push_plain(output: &mut Vec<ProtocolMessage>, bytes: Vec<u8>) {
     output.push(ProtocolMessage::new(Bytes::from(bytes)).unwrap());
 }
 
+#[derive(Default)]
+struct BufferViews {
+    extents: HashMap<u32, (u32, u32)>,
+    presented: Option<u32>,
+}
+
 fn handle_messages(
     client: &mut Client,
     messages: &[WaylandMessage],
     objects: &mut HashMap<u32, Interface>,
+    attached: &mut HashMap<u32, u32>,
+    views: &mut BufferViews,
 ) -> Result<Bytes, String> {
     let mut output = Vec::new();
     for request in messages {
@@ -123,6 +135,9 @@ fn handle_messages(
             (Some(Interface::Registry), 0) => {
                 let id = bind_id(payload);
                 match bind_interface(payload).as_str() {
+                    "wl_compositor" => {
+                        objects.insert(id, Interface::Compositor);
+                    }
                     "wl_shm" => {
                         objects.insert(id, Interface::Shm);
                         push_plain(&mut output, message(id, 0, &0u32.to_le_bytes()));
@@ -134,6 +149,30 @@ fn handle_messages(
                         push_plain(&mut output, message(id, 1, &string("waypane")));
                     }
                     interface => return Err(format!("unexpected bind for {interface}")),
+                }
+            }
+            (Some(Interface::Shm), 0) => {
+                objects.insert(read_u32(payload, 0), Interface::ShmPool);
+            }
+            (Some(Interface::ShmPool), 0) => {
+                let id = read_u32(payload, 0);
+                let offset = read_u32(payload, 4);
+                let (height, stride) = (read_u32(payload, 12), read_u32(payload, 16));
+                views.extents.insert(id, (offset, stride * height));
+                objects.insert(id, Interface::Buffer);
+            }
+            (Some(Interface::Compositor), 0) => {
+                objects.insert(read_u32(payload, 0), Interface::Surface);
+            }
+            (Some(Interface::Surface), 1) => {
+                attached.insert(object_id, read_u32(payload, 0));
+            }
+            (Some(Interface::Surface), 6) => {
+                // Commit of an attached buffer: the compositor is finished with the previous
+                // content, so the client may reuse the SHM buffer once it sees release.
+                if let Some(buffer) = attached.get(&object_id) {
+                    views.presented = Some(*buffer);
+                    push_plain(&mut output, message(*buffer, 0, &[]));
                 }
             }
             (Some(Interface::Seat), 1) => {
@@ -171,9 +210,12 @@ fn serve(mut stream: UnixStream, compression: Compression) -> Result<(), String>
         ..ClientConfig::default()
     });
     let mut objects = HashMap::new();
+    let mut attached = HashMap::new();
+    let mut views = BufferViews::default();
     let mut pool: Option<Rid> = None;
     let mut updates = 0usize;
     let mut buffer = [0u8; 8192];
+    let mut checked = false;
 
     loop {
         if started.elapsed() > Duration::from_secs(20) {
@@ -195,50 +237,49 @@ fn serve(mut stream: UnixStream, compression: Compression) -> Result<(), String>
         let batch = client
             .receive(&buffer[..read])
             .map_err(|error| error.to_string())?;
-        if !batch.outgoing.is_empty() {
-            stream
-                .write_all(&batch.outgoing)
-                .map_err(|error| error.to_string())?;
-        }
+        write_all(&mut stream, &batch.outgoing)?;
 
         for event in batch.events {
             match event {
-                ClientEvent::Closed => return Ok(()),
+                ClientEvent::Closed => {
+                    return if checked {
+                        Ok(())
+                    } else {
+                        Err("waypipe sent Close before the final sync verified the pool"
+                            .to_string())
+                    };
+                }
                 ClientEvent::Protocol(messages) => {
-                    if messages.len() == 1
-                        && messages[0].object_id() == 1
-                        && messages[0].opcode() == 0
-                        && read_u32(messages[0].payload(), 0) == 10
-                    {
+                    // Final sync may share a Protocol frame with other messages. Previously a
+                    // messages.len() == 1 check skipped verification entirely in that layout.
+                    let final_sync = messages.iter().any(is_final_sync);
+                    write_all(
+                        &mut stream,
+                        &handle_messages(
+                            &mut client,
+                            &messages,
+                            &mut objects,
+                            &mut attached,
+                            &mut views,
+                        )?,
+                    )?;
+                    stream.flush().map_err(|error| error.to_string())?;
+                    if final_sync {
                         let Some(rid) = pool else {
                             return Err(
                                 "final sync arrived before a shared-memory pool".to_string()
                             );
                         };
-                        let mut expected: Vec<u8> = (0u8..=255).collect();
-                        expected[4..12].fill(0xaa);
-                        let actual = client
-                            .resources()
-                            .data(rid)
-                            .ok_or_else(|| "pool disappeared".to_string())?;
-                        if actual != expected {
-                            return Err(format!(
-                                "SHM mismatch: len {}, bytes 0..16 {:?}, expected {:?}",
-                                actual.len(),
-                                &actual[..16],
-                                &expected[..16]
-                            ));
-                        }
-                        if updates == 0 {
-                            return Err("no shared-memory updates were received".to_string());
-                        }
-                    }
-                    let frame = handle_messages(&mut client, &messages, &mut objects)?;
-                    if !frame.is_empty() {
-                        stream
-                            .write_all(&frame)
-                            .map_err(|error| error.to_string())?;
-                        stream.flush().map_err(|error| error.to_string())?;
+                        let buffer = views
+                            .presented
+                            .ok_or("final sync arrived before any buffer was committed")?;
+                        let (offset, span) = *views
+                            .extents
+                            .get(&buffer)
+                            .ok_or("committed buffer has no recorded image")?;
+                        verify_pool(&client, rid, (offset as usize, span as usize), updates)?;
+                        checked = true;
+                        println!("SHM_VERIFIED {compression:?} buffer_bytes={span}");
                     }
                 }
                 ClientEvent::ShmOpened { rid, size } => {
@@ -251,7 +292,56 @@ fn serve(mut stream: UnixStream, compression: Compression) -> Result<(), String>
                 _ => {}
             }
         }
+        if checked {
+            println!("SHM_VERIFIED {compression:?}");
+            return Ok(());
+        }
     }
+}
+
+fn is_final_sync(message: &waypipe_client::WaylandMessage) -> bool {
+    message.object_id() == 1 && message.opcode() == 0 && read_u32(message.payload(), 0) == 10
+}
+
+/// Waypipe mirrors the presented buffer's extent (`shm_offset .. + shm_stride * shm_height`,
+/// upstream handlers.c:897-903), not the rest of the pool no buffer ever references.
+fn verify_pool(
+    client: &Client,
+    rid: Rid,
+    (offset, span): (usize, usize),
+    updates: usize,
+) -> Result<(), String> {
+    let mut expected: Vec<u8> = (0u8..=255).collect();
+    expected[4..12].fill(0xaa);
+    let actual = client
+        .resources()
+        .data(rid)
+        .and_then(|pool| pool.get(offset..offset + span))
+        .ok_or_else(|| "presented buffer exceeds the replicated pool".to_string())?;
+    let reference = &expected[offset..offset + span];
+    if actual != reference {
+        let prefix = actual
+            .iter()
+            .zip(reference)
+            .take_while(|(a, b)| a == b)
+            .count();
+        return Err(format!(
+            "SHM buffer mismatch at buffer byte {prefix}: actual={:?}, expected={:?}",
+            &actual[prefix..(prefix + 8).min(span)],
+            &reference[prefix..(prefix + 8).min(span)],
+        ));
+    }
+    if updates == 0 {
+        return Err("no shared-memory updates were received".to_string());
+    }
+    Ok(())
+}
+
+fn write_all(stream: &mut UnixStream, bytes: &[u8]) -> Result<(), String> {
+    if !bytes.is_empty() {
+        stream.write_all(bytes).map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 fn run_replication(waypipe: &Path, compression: &str) -> Result<(), String> {
@@ -344,12 +434,21 @@ fn replicates_shm_and_keymap_with_upstream_waypipe_server() {
     };
     let compressions =
         std::env::var("WAYPIPE_TEST_COMPRESSIONS").unwrap_or_else(|_| "none".to_string());
+    let rounds = std::env::var("WAYPIPE_SHM_ROUNDS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(1);
     for compression in compressions
         .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        run_replication(Path::new(&waypipe), compression)
-            .unwrap_or_else(|error| panic!("{compression} replication failed: {error}"));
+        for round in 0..rounds {
+            if rounds > 1 {
+                eprintln!("SHM_ROUND {round} {compression}");
+            }
+            run_replication(Path::new(&waypipe), compression)
+                .unwrap_or_else(|error| panic!("{compression} replication failed: {error}"));
+        }
     }
 }
