@@ -144,6 +144,9 @@ impl Client {
         self.decoder.push(remaining);
         while let Some(frame) = self.decoder.next_frame()? {
             let operation = format!("processing {:?} frame", frame.kind);
+            if Self::wire_trace_enabled() {
+                Self::trace_frame(&frame, &self.store);
+            }
             if let Err(error) = self.process_frame(frame, &mut events) {
                 return Err(match error {
                     Error::UnknownRid(rid) => self.store.unknown_rid(operation, rid),
@@ -336,6 +339,37 @@ impl Client {
             .checked_sub(1)
             .ok_or_else(|| Error::InvalidFrame("local RID space exhausted".to_string()))?;
         Ok(rid)
+    }
+
+    fn wire_trace_enabled() -> bool {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| std::env::var_os("WAYPIPE_TRACE_WIRE").is_some())
+    }
+
+    fn trace_frame(frame: &crate::wire::RawFrame, store: &ResourceStore) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let payload: &[u8] = &frame.payload;
+        let mut fields = Vec::new();
+        if payload.len() >= 4 {
+            let rid = crate::Rid(i32::from_le_bytes(payload[..4].try_into().unwrap()));
+            let complete = store.ready_for_protocol(rid).ok();
+            let size = store.data(rid).map(<[u8]>::len);
+            fields.push(format!("rid={} ready={complete:?} size={size:?}", rid.0));
+        }
+        if payload.len() >= 12 {
+            let a = u32::from_le_bytes(payload[4..8].try_into().unwrap());
+            let b = u32::from_le_bytes(payload[8..12].try_into().unwrap());
+            fields.push(format!("u32@4={a} u32@8={b}"));
+        }
+        eprintln!(
+            "WIRE seq={} kind={:?} payload_len={} {}",
+            SEQ.fetch_add(1, Ordering::Relaxed),
+            frame.kind,
+            payload.len(),
+            fields.join(" ")
+        );
     }
 
     fn process_frame(

@@ -344,12 +344,19 @@ fn replicates_shm_and_keymap_with_upstream_waypipe_server() {
     };
     let compressions =
         std::env::var("WAYPIPE_TEST_COMPRESSIONS").unwrap_or_else(|_| "none".to_string());
+    let rounds = std::env::var("WAYPIPE_SHM_ROUNDS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(1);
     for compression in compressions
         .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        run_replication(Path::new(&waypipe), compression)
-            .unwrap_or_else(|error| panic!("{compression} replication failed: {error}"));
+        for round in 0..rounds {
+            eprintln!("SHM_ROUND {round} {compression}");
+            run_replication(Path::new(&waypipe), compression)
+                .unwrap_or_else(|error| panic!("{compression} replication failed: {error}"));
+        }
     }
 }
