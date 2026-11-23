@@ -12,6 +12,7 @@ path = display if display.startswith("/") else os.path.join(runtime_dir, display
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 sock.connect(path)
 buffer = bytearray()
+buffer_ids = set()
 
 
 def message(object_id, opcode, payload):
@@ -20,6 +21,15 @@ def message(object_id, opcode, payload):
 
 def sync(callback_id):
     sock.sendall(message(1, 0, struct.pack("<I", callback_id)))
+
+
+def present(surface, buffer_id):
+    buffer_ids.add(buffer_id)
+    # Waypipe marks shared memory dirty on surface commits (handlers.c), allocates a zeroed
+    # mirror on the first transfer and sends a sparse diff against it (shadow.c collect_update).
+    sock.sendall(message(surface, 1, struct.pack("<Iii", buffer_id, 0, 0)))
+    sock.sendall(message(surface, 2, struct.pack("<iiii", 0, 0, 4, 4)))
+    sock.sendall(message(surface, 6, b""))
 
 
 def receive():
@@ -54,11 +64,14 @@ def receive():
 
 
 def wait_for_done(callback_id):
+    released = set()
     for object_id, opcode, _, descriptors in receive():
         for fd in descriptors:
             os.close(fd)
+        if object_id in buffer_ids and opcode == 0:
+            released.add(object_id)
         if object_id == callback_id and opcode == 0:
-            return
+            return released
 
 
 def bind(registry, name, interface, version, object_id):
@@ -75,6 +88,8 @@ wait_for_done(3)
 bind(2, 2, "wl_shm", 1, 4)
 sync(5)
 wait_for_done(5)
+
+bind(2, 1, "wl_compositor", 4, 11)
 
 bind(2, 3, "wl_seat", 7, 12)
 sock.sendall(message(12, 1, struct.pack("<I", 13)))
@@ -103,13 +118,16 @@ with tempfile.TemporaryFile() as pool:
         [(socket.SOL_SOCKET, socket.SCM_RIGHTS, rights.tobytes())],
     )
     sock.sendall(message(6, 0, struct.pack("<IiiiiI", 7, 0, 4, 4, 16, 0)))
+    sock.sendall(message(11, 0, struct.pack("<I", 15)))
+    present(15, 7)
     sync(8)
-    wait_for_done(8)
+    released = wait_for_done(8)
+    assert 7 in released, "buffer reused before the compositor released it"
 
     pool.seek(4)
     pool.write(b"\xaa" * 8)
     pool.flush()
-    sock.sendall(message(6, 0, struct.pack("<IiiiiI", 9, 0, 4, 4, 16, 0)))
+    present(15, 7)
     sync(10)
     wait_for_done(10)
 
