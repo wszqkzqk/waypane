@@ -174,9 +174,20 @@ fn serve(mut stream: UnixStream, compression: Compression) -> Result<(), String>
     let mut pool: Option<Rid> = None;
     let mut updates = 0usize;
     let mut buffer = [0u8; 8192];
+    let mut waiting_since: Option<Instant> = None;
 
     loop {
-        if started.elapsed() > Duration::from_secs(20) {
+        if let Some(since) = waiting_since {
+            if since.elapsed() > Duration::from_secs(5) {
+                let resources = client.resources();
+                return Err(format!(
+                    "final sync arrived but pool {:?} was not fully transferred within 5s (ready={:?}, size={:?}, updates={updates})",
+                    pool,
+                    pool.and_then(|rid| resources.ready_for_protocol(rid).ok()),
+                    pool.and_then(|rid| resources.data(rid).map(<[u8]>::len)),
+                ));
+            }
+        } else if started.elapsed() > Duration::from_secs(20) {
             return Err("timed out waiting for waypipe traffic".to_string());
         }
         let read = match stream.read(&mut buffer) {
@@ -203,42 +214,29 @@ fn serve(mut stream: UnixStream, compression: Compression) -> Result<(), String>
 
         for event in batch.events {
             match event {
-                ClientEvent::Closed => return Ok(()),
+                ClientEvent::Closed => {
+                    return Err(format!(
+                        "waypipe sent Close before the pool contents were verified (waiting={})",
+                        waiting_since.is_some()
+                    ));
+                }
                 ClientEvent::Protocol(messages) => {
-                    if messages.len() == 1
-                        && messages[0].object_id() == 1
-                        && messages[0].opcode() == 0
-                        && read_u32(messages[0].payload(), 0) == 10
-                    {
+                    // Final sync may share a Protocol frame with other messages. Previously a
+                    // messages.len() == 1 test silently skipped verification in that layout.
+                    let final_sync = messages.iter().any(is_final_sync);
+                    write_all(
+                        &mut stream,
+                        &handle_messages(&mut client, &messages, &mut objects)?,
+                    )?;
+                    stream.flush().map_err(|error| error.to_string())?;
+                    if final_sync && waiting_since.is_none() {
                         let Some(rid) = pool else {
                             return Err(
                                 "final sync arrived before a shared-memory pool".to_string()
                             );
                         };
-                        let mut expected: Vec<u8> = (0u8..=255).collect();
-                        expected[4..12].fill(0xaa);
-                        let actual = client
-                            .resources()
-                            .data(rid)
-                            .ok_or_else(|| "pool disappeared".to_string())?;
-                        if actual != expected {
-                            return Err(format!(
-                                "SHM mismatch: len {}, bytes 0..16 {:?}, expected {:?}",
-                                actual.len(),
-                                &actual[..16],
-                                &expected[..16]
-                            ));
-                        }
-                        if updates == 0 {
-                            return Err("no shared-memory updates were received".to_string());
-                        }
-                    }
-                    let frame = handle_messages(&mut client, &messages, &mut objects)?;
-                    if !frame.is_empty() {
-                        stream
-                            .write_all(&frame)
-                            .map_err(|error| error.to_string())?;
-                        stream.flush().map_err(|error| error.to_string())?;
+                        verify_pool(&client, rid, updates)?;
+                        waiting_since = Some(Instant::now());
                     }
                 }
                 ClientEvent::ShmOpened { rid, size } => {
@@ -251,7 +249,53 @@ fn serve(mut stream: UnixStream, compression: Compression) -> Result<(), String>
                 _ => {}
             }
         }
+        if waiting_since.is_some()
+            && verify_pool(&client, pool.expect("waiting needs a pool"), updates)?
+        {
+            println!("SHM_VERIFIED {compression:?}");
+            return Ok(());
+        }
     }
+}
+
+fn is_final_sync(message: &waypipe_client::WaylandMessage) -> bool {
+    message.object_id() == 1 && message.opcode() == 0 && read_u32(message.payload(), 0) == 10
+}
+
+/// Passes only once the whole pool has arrived; upstream may inject a rid before its fill.
+fn verify_pool(client: &Client, rid: Rid, updates: usize) -> Result<bool, String> {
+    if !client
+        .resources()
+        .ready_for_protocol(rid)
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(false);
+    }
+    let mut expected: Vec<u8> = (0u8..=255).collect();
+    expected[4..12].fill(0xaa);
+    let actual = client
+        .resources()
+        .data(rid)
+        .ok_or_else(|| "pool disappeared".to_string())?;
+    if actual != expected {
+        return Err(format!(
+            "SHM mismatch when ready: len {}, bytes 0..16 {:?}, expected {:?}",
+            actual.len(),
+            &actual[..16],
+            &expected[..16]
+        ));
+    }
+    if updates == 0 {
+        return Err("no shared-memory updates were received".to_string());
+    }
+    Ok(true)
+}
+
+fn write_all(stream: &mut UnixStream, bytes: &[u8]) -> Result<(), String> {
+    if !bytes.is_empty() {
+        stream.write_all(bytes).map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 fn run_replication(waypipe: &Path, compression: &str) -> Result<(), String> {

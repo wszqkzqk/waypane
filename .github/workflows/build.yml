@@ -118,18 +118,35 @@ jobs:
         env:
           WAYPIPE_TEST_COMPRESSIONS: none,lz4,zstd
         run: cargo test -p waypipe-client --locked --test upstream_shm -- --ignored --nocapture
-      - name: Repeat zstd SHM replication with wire trace (diagnostic)
+      - name: Trace upstream file transfer with a debug peer (diagnostic)
         env:
+          WAYPIPE_TEST_BINARY: ${{ github.workspace }}/target/upstream-debug/debug/waypipe
           WAYPIPE_TEST_COMPRESSIONS: zstd
           WAYPIPE_TRACE_WIRE: "1"
-          WAYPIPE_SHM_ROUNDS: "60"
+          WAYPIPE_SHM_ROUNDS: "1"
         run: |
-          if cargo test -p waypipe-client --locked --test upstream_shm -- --ignored --nocapture > target/wire-trace.log 2>&1; then
-            tail -n 5 target/wire-trace.log
+          cargo build \
+            --manifest-path vendor/waypipe/Cargo.toml \
+            --locked \
+            --no-default-features \
+            --features lz4,zstd \
+            --bin waypipe \
+            --target-dir target/upstream-debug
+          { echo 'WAYPIPE_VERSION<<EOF'; "$WAYPIPE_TEST_BINARY" --version; echo EOF; } >> "$GITHUB_ENV"
+          if cargo test -p waypipe-client --locked --test upstream_shm -- --ignored --nocapture > target/wire-sender.log 2>&1; then
+            tail -n 10 target/wire-sender.log
           else
-            tail -c 60000 target/wire-trace.log
-            exit 1
+            python3 - <<'PY'
+          import re
+          s = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", open("target/wire-sender.log", errors="replace").read())
+          lines = s.splitlines()
+          keep = [l for l in lines if any(k in l for k in ("SHM_", "WIRE", "waypipe-server", "replication failed", "panicked", "remote SHM", "Traceback"))]
+          for l in keep[-90:]:
+              print(re.sub(r"^\S* \S*Z ", "", l)[:240])
+          raise SystemExit(1)
+          PY
           fi
+
       - name: Test clipboard, text input, and toplevel protocols
         run: |
           cargo test -p waypane-core --locked \

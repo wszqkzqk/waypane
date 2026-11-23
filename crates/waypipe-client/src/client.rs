@@ -146,6 +146,12 @@ impl Client {
             let operation = format!("processing {:?} frame", frame.kind);
             if Self::wire_trace_enabled() {
                 Self::trace_frame(&frame, &self.store);
+                if frame.kind == crate::MessageType::Close {
+                    eprintln!(
+                        "WIRE_CLOSE buffered_after_next_frame={}",
+                        self.decoder.buffered_len()
+                    );
+                }
             }
             if let Err(error) = self.process_frame(frame, &mut events) {
                 return Err(match error {
@@ -153,7 +159,7 @@ impl Client {
                     other => other,
                 });
             }
-            if self.closed {
+            if self.closed && !Self::wire_trace_enabled() {
                 break;
             }
         }
