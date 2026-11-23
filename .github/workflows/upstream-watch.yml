@@ -1,0 +1,72 @@
+name: Upstream Waypipe releases
+
+on:
+  schedule:
+    - cron: '23 2 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-waypipe-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    name: Check for new Waypipe releases
+    if: github.repository == 'wszqkzqk/waypane'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Configure git author for the update branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Check upstream releases
+        id: check
+        run: scripts/waypipe-upstream.sh check
+      - name: Prepare upstream update branch
+        if: steps.check.outputs.update_available == 'true'
+        id: update
+        run: |
+          set -euo pipefail
+          tag="${{ steps.check.outputs.latest_tag }}"
+          branch="upstream/waypipe-${tag}"
+          git switch -c "$branch"
+          scripts/waypipe-upstream.sh update "$tag"
+          git diff --cached --quiet || git commit -qm "chore(vendor): waypipe $tag"
+          git push --force-with-lease origin "HEAD:refs/heads/$branch"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+      - name: Open or update upgrade pull request
+        if: steps.check.outputs.update_available == 'true'
+        env:
+          BRANCH: ${{ steps.update.outputs.branch }}
+          NEW_TAG: ${{ steps.check.outputs.latest_tag }}
+          OLD_TAG: ${{ steps.check.outputs.current_tag }}
+        run: |
+          set -euo pipefail
+          cat > target/pr-body.md <<EOF
+          Imports upstream Waypipe [\`$NEW_TAG\`](https://gitlab.freedesktop.org/mstoeckl/waypipe/-/tags/$NEW_TAG) as a git subtree squash commit and records its peeled commit in \`vendor/waypipe.upstream.toml\`.
+
+          - \`scripts/waypipe-upstream.sh verify\` checks that \`vendor/waypipe\` is an unchanged upstream snapshot.
+          - CI runs interoperability against both the vendored baseline and the newest recorded release (\`$OLD_TAG\` -> \`$NEW_TAG\`).
+          - If protocol XML changed upstream, review the copies under \`crates/waypane-core/protocols/\` before merging.
+
+          [Upstream compare](https://gitlab.freedesktop.org/mstoeckl/waypipe/-/compare/$OLD_TAG...$NEW_TAG)
+          EOF
+          existing=$(gh pr list --repo "${GITHUB_REPOSITORY:-wszqkzqk/waypane}" --head "$BRANCH" --state open --json number --jq 'length')
+          if [ "$existing" = 0 ]; then
+            gh pr create --repo "${GITHUB_REPOSITORY:-wszqkzqk/waypane}" --base main --head "$BRANCH" \
+              --title "chore(vendor): Waypipe $NEW_TAG" --body-file target/pr-body.md
+          else
+            gh pr comment --repo "${GITHUB_REPOSITORY:-wszqkzqk/waypane}" "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number')" --body-file target/pr-body.md
+          fi

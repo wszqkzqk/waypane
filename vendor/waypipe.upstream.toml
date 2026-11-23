@@ -1,0 +1,7 @@
+# Provenance for the read-only upstream Waypipe copy in vendor/waypipe.
+# Managed by scripts/waypipe-upstream.sh. commit is the peeled tag commit.
+repository = "https://gitlab.freedesktop.org/mstoeckl/waypipe.git"
+tag = "v0.11.3"
+commit = "3ea049b2d33cbf1000714c28b9668f8c244f70bd"
+latest_tag = "v0.11.3"
+latest_commit = "3ea049b2d33cbf1000714c28b9668f8c244f70bd"
