@@ -46,6 +46,8 @@ impl Drop for TempRuntime {
 enum Interface {
     Registry,
     Compositor,
+    Surface,
+    Buffer,
     Shm,
     Seat,
     Keyboard,
@@ -98,10 +100,18 @@ fn push_plain(output: &mut Vec<ProtocolMessage>, bytes: Vec<u8>) {
     output.push(ProtocolMessage::new(Bytes::from(bytes)).unwrap());
 }
 
+#[derive(Default)]
+struct BufferViews {
+    extents: HashMap<u32, (u32, u32)>,
+    presented: Option<u32>,
+}
+
 fn handle_messages(
     client: &mut Client,
     messages: &[WaylandMessage],
     objects: &mut HashMap<u32, Interface>,
+    attached: &mut HashMap<u32, u32>,
+    views: &mut BufferViews,
 ) -> Result<Bytes, String> {
     let mut output = Vec::new();
     for request in messages {
@@ -140,6 +150,27 @@ fn handle_messages(
                     interface => return Err(format!("unexpected bind for {interface}")),
                 }
             }
+            (Some(Interface::Shm), 0) => {
+                let id = read_u32(payload, 0);
+                let offset = read_u32(payload, 4);
+                let (height, stride) = (read_u32(payload, 12), read_u32(payload, 16));
+                views.extents.insert(id, (offset, stride * height));
+                objects.insert(id, Interface::Buffer);
+            }
+            (Some(Interface::Compositor), 0) => {
+                objects.insert(read_u32(payload, 0), Interface::Surface);
+            }
+            (Some(Interface::Surface), 1) => {
+                attached.insert(object_id, read_u32(payload, 0));
+            }
+            (Some(Interface::Surface), 6) => {
+                // Commit of an attached buffer: the compositor is finished with the previous
+                // content, so the client may reuse the SHM buffer once it sees release.
+                if let Some(buffer) = attached.get(&object_id) {
+                    views.presented = Some(*buffer);
+                    push_plain(&mut output, message(*buffer, 0, &[]));
+                }
+            }
             (Some(Interface::Seat), 1) => {
                 let keyboard = read_u32(payload, 0);
                 objects.insert(keyboard, Interface::Keyboard);
@@ -175,6 +206,8 @@ fn serve(mut stream: UnixStream, compression: Compression) -> Result<(), String>
         ..ClientConfig::default()
     });
     let mut objects = HashMap::new();
+    let mut attached = HashMap::new();
+    let mut views = BufferViews::default();
     let mut pool: Option<Rid> = None;
     let mut updates = 0usize;
     let mut buffer = [0u8; 8192];
@@ -214,23 +247,35 @@ fn serve(mut stream: UnixStream, compression: Compression) -> Result<(), String>
                 }
                 ClientEvent::Protocol(messages) => {
                     // Final sync may share a Protocol frame with other messages. Previously a
-                    // messages.len() == 1 test skipped verification entirely in that layout.
+                    // messages.len() == 1 check skipped verification entirely in that layout.
                     let final_sync = messages.iter().any(is_final_sync);
                     write_all(
                         &mut stream,
-                        &handle_messages(&mut client, &messages, &mut objects)?,
+                        &handle_messages(
+                            &mut client,
+                            &messages,
+                            &mut objects,
+                            &mut attached,
+                            &mut views,
+                        )?,
                     )?;
                     stream.flush().map_err(|error| error.to_string())?;
                     if final_sync {
-                        // The fixture commits damaged buffers before syncing; like upstream, the
-                        // client applies earlier resource frames synchronously before protocol.
                         let Some(rid) = pool else {
                             return Err(
                                 "final sync arrived before a shared-memory pool".to_string()
                             );
                         };
-                        verify_pool(&client, rid, updates)?;
+                        let buffer = views
+                            .presented
+                            .ok_or("final sync arrived before any buffer was committed")?;
+                        let (offset, span) = *views
+                            .extents
+                            .get(&buffer)
+                            .ok_or("committed buffer has no recorded image")?;
+                        verify_pool(&client, rid, (offset as usize, span as usize), updates)?;
                         checked = true;
+                        println!("SHM_VERIFIED {compression:?} buffer_bytes={span}");
                     }
                 }
                 ClientEvent::ShmOpened { rid, size } => {
@@ -254,27 +299,32 @@ fn is_final_sync(message: &waypipe_client::WaylandMessage) -> bool {
     message.object_id() == 1 && message.opcode() == 0 && read_u32(message.payload(), 0) == 10
 }
 
-fn verify_pool(client: &Client, rid: Rid, updates: usize) -> Result<(), String> {
+/// Waypipe mirrors the presented buffer's extent (`shm_offset .. + shm_stride * shm_height`,
+/// upstream handlers.c:897-903), not the rest of the pool no buffer ever references.
+fn verify_pool(
+    client: &Client,
+    rid: Rid,
+    (offset, span): (usize, usize),
+    updates: usize,
+) -> Result<(), String> {
     let mut expected: Vec<u8> = (0u8..=255).collect();
     expected[4..12].fill(0xaa);
     let actual = client
         .resources()
         .data(rid)
-        .ok_or_else(|| "pool disappeared".to_string())?;
-    if actual != expected {
+        .and_then(|pool| pool.get(offset..offset + span))
+        .ok_or_else(|| "presented buffer exceeds the replicated pool".to_string())?;
+    let reference = &expected[offset..offset + span];
+    if actual != reference {
         let prefix = actual
             .iter()
-            .zip(&expected)
+            .zip(reference)
             .take_while(|(a, b)| a == b)
             .count();
-        let mismatches = actual.iter().zip(&expected).filter(|(a, b)| a != b).count();
-        let end = (prefix + 16).min(actual.len());
         return Err(format!(
-            "SHM mismatch: len {} expected {}, mismatched_bytes={mismatches}, common_prefix={prefix}, actual[{prefix}..{end}]={:?}, expected[{prefix}..{end}]={:?}",
-            actual.len(),
-            expected.len(),
-            &actual[prefix..end],
-            &expected[prefix..end],
+            "SHM buffer mismatch at buffer byte {prefix}: actual={:?}, expected={:?}",
+            &actual[prefix..(prefix + 8).min(span)],
+            &reference[prefix..(prefix + 8).min(span)],
         ));
     }
     if updates == 0 {
@@ -390,7 +440,9 @@ fn replicates_shm_and_keymap_with_upstream_waypipe_server() {
         .filter(|s| !s.is_empty())
     {
         for round in 0..rounds {
-            eprintln!("SHM_ROUND {round} {compression}");
+            if rounds > 1 {
+                eprintln!("SHM_ROUND {round} {compression}");
+            }
             run_replication(Path::new(&waypipe), compression)
                 .unwrap_or_else(|error| panic!("{compression} replication failed: {error}"));
         }
