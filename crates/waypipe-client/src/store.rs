@@ -85,7 +85,6 @@ impl From<Vec<u8>> for ShmData {
 struct RemoteFile {
     data: Arc<Vec<u8>>,
     damage: Vec<Range<usize>>,
-    applied: Vec<Range<usize>>,
 }
 
 impl RemoteFile {
@@ -97,35 +96,6 @@ impl RemoteFile {
             }
         }
         self.damage.push(range);
-    }
-
-    /// Tracks transferred byte ranges (coalesced) so protocol consumers can wait until the whole
-    /// file has arrived, instead of relying on frame timing. Distinct from outbound damage.
-    fn record_applied(&mut self, range: Range<usize>) {
-        if range.is_empty() {
-            return;
-        }
-        let mut merged = range.clone();
-        self.applied.retain(|existing| {
-            if existing.end < merged.start || merged.end < existing.start {
-                return true;
-            }
-            merged.start = merged.start.min(existing.start);
-            merged.end = merged.end.max(existing.end);
-            false
-        });
-        let index = self
-            .applied
-            .partition_point(|existing| existing.start < merged.start);
-        self.applied.insert(index, merged);
-    }
-
-    fn is_complete(&self) -> bool {
-        self.data.is_empty()
-            || self
-                .applied
-                .first()
-                .is_some_and(|range| range.start == 0 && range.end >= self.data.len())
     }
 }
 
@@ -187,7 +157,6 @@ impl ResourceStore {
             RemoteFile {
                 data: Arc::new(vec![0; size]),
                 damage: Vec::new(),
-                applied: Vec::new(),
             },
         );
         self.fresh.insert(rid);
@@ -333,7 +302,6 @@ impl ResourceStore {
         Arc::make_mut(&mut file.data)[start..end].copy_from_slice(&bytes);
         if start < end {
             file.record_damage(start..end);
-            file.record_applied(start..end);
             Ok(vec![start..end])
         } else {
             Ok(Vec::new())
@@ -414,7 +382,6 @@ impl ResourceStore {
 
             let data_start = offset + 8;
             let copy = &diff[data_start..data_start + copy_size];
-            file.record_applied(byte_start..byte_end);
             if file.data[byte_start..byte_end] != *copy {
                 Arc::make_mut(&mut file.data)[byte_start..byte_end].copy_from_slice(copy);
                 file.record_damage(byte_start..byte_end);
@@ -425,7 +392,6 @@ impl ResourceStore {
 
         if trailing_size > 0 {
             let start = file_size - trailing_size;
-            file.record_applied(start..file_size);
             if file.data[start..] != *trailing {
                 Arc::make_mut(&mut file.data)[start..].copy_from_slice(trailing);
                 file.record_damage(start..file_size);
@@ -611,20 +577,6 @@ impl ResourceStore {
             .or_else(|| self.local_files.get(&rid).map(|file| file.data.as_ref()))
     }
 
-    /// Whether a rid referenced by Wayland protocol can be consumed yet. Remote shared-memory
-    /// files are ready only once every byte of the current size has arrived, mirroring upstream
-    /// Waypipe's WaitFor on pending file applies before it hands protocol to Wayland. Pipes
-    /// deliver data through PipeAvailable and are immediately usable.
-    pub fn ready_for_protocol(&self, rid: Rid) -> Result<bool, Error> {
-        if let Some(file) = self.remote_files.get(&rid) {
-            return Ok(file.is_complete());
-        }
-        if self.local_files.contains_key(&rid) || self.pipes.contains_key(&rid) {
-            return Ok(true);
-        }
-        Err(Error::UnknownRid(rid))
-    }
-
     pub fn damage(&self, rid: Rid) -> Option<&[Range<usize>]> {
         self.remote_files
             .get(&rid)
@@ -699,105 +651,5 @@ impl ResourceStore {
             operation,
             state,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::compression::{compress, DEFAULT_MAX_SHM_TRANSFER_SIZE};
-
-    fn store() -> ResourceStore {
-        ResourceStore::new(
-            DEFAULT_MAX_SHM_FILE_SIZE,
-            DEFAULT_MAX_SHM_TRANSFER_SIZE,
-            DEFAULT_MAX_TOTAL_SHM_SIZE,
-        )
-    }
-
-    fn fill(start: u32, data: &[u8]) -> Vec<u8> {
-        let mut payload = start.to_le_bytes().to_vec();
-        payload.extend_from_slice(&(start + data.len() as u32).to_le_bytes());
-        payload.extend_from_slice(data);
-        payload
-    }
-
-    fn ready(store: &ResourceStore, rid: Rid) -> bool {
-        store.ready_for_protocol(rid).unwrap()
-    }
-
-    #[test]
-    fn protocol_readiness_tracks_transferred_ranges_not_creation() {
-        let mut store = store();
-        let rid = Rid(5);
-        assert!(matches!(
-            store.ready_for_protocol(rid),
-            Err(Error::UnknownRid(_))
-        ));
-        store.open_file(rid, 12).unwrap();
-        assert!(!ready(&store, rid));
-        store
-            .apply_fill(rid, &fill(8, &[4; 4]), Compression::None)
-            .unwrap();
-        store
-            .apply_fill(rid, &fill(0, &[1; 4]), Compression::None)
-            .unwrap();
-        assert!(!ready(&store, rid));
-        store
-            .apply_fill(rid, &fill(4, &[2; 4]), Compression::None)
-            .unwrap();
-        assert!(ready(&store, rid));
-
-        store.extend_file(rid, 16).unwrap();
-        assert!(!ready(&store, rid), "extension needs its new bytes");
-        store
-            .apply_fill(rid, &fill(12, &[5; 4]), Compression::None)
-            .unwrap();
-        assert!(ready(&store, rid));
-        assert_eq!(
-            store.data(rid).unwrap(),
-            [1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 4, 5, 5, 5, 5]
-        );
-    }
-
-    #[test]
-    fn zstd_compressed_fill_delivers_content_before_readiness() {
-        let mut store = store();
-        let rid = Rid(6);
-        let content: Vec<u8> = (0..=255).collect();
-        store.open_file(rid, content.len() as i32).unwrap();
-        let mut payload = 0_u32.to_le_bytes().to_vec();
-        payload.extend_from_slice(&256_u32.to_le_bytes());
-        payload.extend_from_slice(&compress(Compression::Zstd, &content).unwrap());
-        store.apply_fill(rid, &payload, Compression::Zstd).unwrap();
-        assert!(ready(&store, rid));
-        assert_eq!(store.data(rid).unwrap(), &content[..]);
-    }
-
-    #[test]
-    fn diffs_satisfy_readiness_even_when_bytes_are_unchanged() {
-        let mut store = store();
-        let rid = Rid(7);
-        store.open_file(rid, 8).unwrap();
-        let mut payload = 12_u32.to_le_bytes().to_vec();
-        payload.extend_from_slice(&4_u32.to_le_bytes());
-        payload.extend_from_slice(&0_u32.to_le_bytes());
-        payload.extend_from_slice(&1_u32.to_le_bytes());
-        payload.extend_from_slice(&[0xaa; 4]);
-        payload.extend_from_slice(&[0xbb; 4]);
-        store.apply_diff(rid, &payload, Compression::None).unwrap();
-        assert!(ready(&store, rid));
-        assert_eq!(
-            store.data(rid).unwrap(),
-            [0xaa, 0xaa, 0xaa, 0xaa, 0xbb, 0xbb, 0xbb, 0xbb]
-        );
-    }
-
-    #[test]
-    fn pipes_are_usable_without_file_completion() {
-        let mut store = store();
-        let rid = Rid(8);
-        store.open_remote_pipe(rid, PipeOpenKind::RW).unwrap();
-        assert!(ready(&store, rid));
     }
 }

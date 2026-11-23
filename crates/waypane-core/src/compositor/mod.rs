@@ -8,8 +8,7 @@ use crate::error::{Error, Result};
 use crate::protocol::wayland as wl;
 use crate::protocol::xdg;
 use crate::protocol::{
-    decode_request, event, event_opcode, event_with_fd, fd_count, request_method, Argument,
-    DecodedRequest, Value, GLOBALS,
+    decode_request, event, event_opcode, event_with_fd, Argument, DecodedRequest, Value, GLOBALS,
 };
 mod clipboard;
 mod dispatch;
@@ -19,9 +18,6 @@ mod xdg_shell;
 use crate::state::*;
 use crate::types::*;
 pub use scale::MAX_WAYLAND_SCALE;
-
-pub(crate) const MAX_WAITING_REQUESTS: usize = 4096;
-const MAX_WAITING_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Default, Clone, Copy)]
 struct Modifiers {
@@ -109,8 +105,6 @@ pub struct Compositor {
     touches: BTreeMap<i32, (SurfaceId, f64, f64)>,
     text_inputs: BTreeMap<u32, TextInput>,
     modifiers: Modifiers,
-    waiting_requests: VecDeque<waypipe_client::WaylandMessage>,
-    waiting_request_bytes: usize,
 }
 
 impl Compositor {
@@ -165,14 +159,9 @@ impl Compositor {
             touches: BTreeMap::new(),
             text_inputs: BTreeMap::new(),
             modifiers: Modifiers::default(),
-            waiting_requests: VecDeque::new(),
-            waiting_request_bytes: 0,
         }
     }
 
-    /// Dispatches requests in wire order. A request whose fd slots reference shared memory that
-    /// has not fully arrived waits, along with everything behind it, like upstream's WaitFor.
-    /// Without this, clients could observe a sync or commit against a zero-filled buffer.
     pub fn process(
         &mut self,
         client: &mut Client,
@@ -180,18 +169,6 @@ impl Compositor {
         rids: &mut VecDeque<Rid>,
     ) -> Result<()> {
         for message in messages {
-            let size = message.as_bytes().len();
-            if self.waiting_requests.len() == MAX_WAITING_REQUESTS
-                || size > MAX_WAITING_REQUEST_BYTES - self.waiting_request_bytes
-            {
-                return Err(Error::protocol(
-                    "too many Wayland requests waiting for shared memory",
-                ));
-            }
-            self.waiting_request_bytes += size;
-            self.waiting_requests.push_back(message.clone());
-        }
-        while let Some(message) = self.waiting_requests.front() {
             let object_id = message.object_id();
             let record = self
                 .objects
@@ -201,24 +178,7 @@ impl Compositor {
                     object_id,
                     interface: "request",
                 })?;
-            let method = request_method(message, record.interface, record.version)?;
-            let fds = fd_count(method);
-            if fds > 0 {
-                // Malformed fd requests (missing RID/tag) fail immediately, never wait.
-                let mut probe = rids.clone();
-                decode_request(message, record.interface, record.version, &mut probe)?;
-            }
-            if fds > 0 && rids.len() >= fds {
-                let ready = rids.iter().take(fds).try_fold(true, |all_ready, rid| {
-                    Ok::<_, Error>(all_ready && client.resources().ready_for_protocol(*rid)?)
-                })?;
-                if !ready {
-                    break;
-                }
-            }
-            let message = self.waiting_requests.pop_front().unwrap();
-            self.waiting_request_bytes -= message.as_bytes().len();
-            let request = decode_request(&message, record.interface, record.version, rids)?;
+            let request = decode_request(message, record.interface, record.version, rids)?;
             let kind = record.kind;
             self.dispatch(client, &request, kind)?;
             if request.method.is_destructor && self.objects.contains_key(&object_id) {
@@ -226,10 +186,6 @@ impl Compositor {
             }
         }
         Ok(())
-    }
-
-    pub(crate) fn has_waiting_requests(&self) -> bool {
-        !self.waiting_requests.is_empty()
     }
 
     pub fn take_outgoing(&mut self) -> Vec<ProtocolMessage> {
