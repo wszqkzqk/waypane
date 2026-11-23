@@ -270,7 +270,7 @@ private fun SetupScreen(model: WaypaneViewModel) {
     var host by rememberSaveable { mutableStateOf("127.0.0.1") }
     var port by rememberSaveable { mutableStateOf("8022") }
     var user by rememberSaveable { mutableStateOf("") }
-    var command by rememberSaveable { mutableStateOf("foot") }
+    var command by rememberSaveable { mutableStateOf("weston") }
     var compression by rememberSaveable { mutableStateOf("lz4") }
     var identity by rememberSaveable { mutableStateOf(model.importedKeyPath()) }
     var remoteSocket by rememberSaveable { mutableStateOf("") }
@@ -488,7 +488,7 @@ private fun SetupScreen(model: WaypaneViewModel) {
             singleLine = true,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
             keyboardActions = KeyboardActions(onDone = { if (canConnect) submit() }),
-            supportingText = { Text("Application and arguments only, for example: env LANG=C foot. Waypipe options are managed automatically.") },
+            supportingText = { Text("Application and arguments only, for example: env LANG=C weston. Waypipe options are managed automatically.") },
             modifier = Modifier.fillMaxWidth(),
         )
         Text(

@@ -65,7 +65,7 @@ data class ConnectionProfile(
     val password: String = "",
     val remoteSocket: String = "",
     val compression: String = "lz4",
-    val command: String = "foot",
+    val command: String = "weston",
     val autoResize: Boolean = true,
     val waylandScale: Int = WAYLAND_SCALE_AUTO,
 )
