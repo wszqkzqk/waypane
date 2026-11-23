@@ -262,11 +262,19 @@ fn verify_pool(client: &Client, rid: Rid, updates: usize) -> Result<(), String> 
         .data(rid)
         .ok_or_else(|| "pool disappeared".to_string())?;
     if actual != expected {
+        let prefix = actual
+            .iter()
+            .zip(&expected)
+            .take_while(|(a, b)| a == b)
+            .count();
+        let mismatches = actual.iter().zip(&expected).filter(|(a, b)| a != b).count();
+        let end = (prefix + 16).min(actual.len());
         return Err(format!(
-            "SHM mismatch: len {}, bytes 0..16 {:?}, expected {:?}",
+            "SHM mismatch: len {} expected {}, mismatched_bytes={mismatches}, common_prefix={prefix}, actual[{prefix}..{end}]={:?}, expected[{prefix}..{end}]={:?}",
             actual.len(),
-            &actual[..16],
-            &expected[..16]
+            expected.len(),
+            &actual[prefix..end],
+            &expected[prefix..end],
         ));
     }
     if updates == 0 {
