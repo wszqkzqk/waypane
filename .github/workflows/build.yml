@@ -136,7 +136,6 @@ jobs:
           keep = [l for l in lines if re.search(r"(SHM_|replication|panicked|remote SHM|Traceback|diff|fill|shard|dirty|damage|commit|update|file|transfer|protocol|send|skip|unchanged)", l, re.I)]
           for l in keep[-70:]:
               print(re.sub(r"^\S* \S*Z ", "", l)[:240])
-          raise SystemExit(min(1, 0))
           PY
           exit $rc
 
