@@ -7,6 +7,7 @@ use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowLevel};
 
 use crate::image::{output_size, Canvas, ImageError};
+use crate::present::{canvas_texture_format, preferred_surface_format};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DesktopError {
@@ -35,6 +36,7 @@ struct NativeWindow {
     blitter: wgpu::util::TextureBlitter,
     texture: Option<wgpu::Texture>,
     texture_size: waypane_core::Size,
+    texture_format: wgpu::TextureFormat,
     canvas: Canvas,
     buffer_scale: i32,
     straight_alpha: bool,
@@ -76,6 +78,7 @@ impl NativeWindow {
             blitter,
             texture: None,
             texture_size: waypane_core::Size::default(),
+            texture_format: canvas_texture_format(format),
             canvas: Canvas::default(),
             buffer_scale: 1,
             straight_alpha: alpha_mode == wgpu::CompositeAlphaMode::PostMultiplied,
@@ -104,7 +107,7 @@ impl NativeWindow {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
+                format: self.texture_format,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             }));
@@ -485,16 +488,16 @@ impl DesktopRenderer {
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
                 .map_err(|error| DesktopError::Gpu(error.to_string()))?;
         let capabilities = surface.get_capabilities(&adapter);
-        let format = *capabilities
-            .formats
-            .first()
+        let format = preferred_surface_format(&capabilities.formats)
             .ok_or_else(|| DesktopError::Gpu("surface reports no supported formats".to_string()))?;
         let alpha_mode = surface_alpha_mode(&capabilities.alpha_modes);
         log::info!(
-            "GPU adapter: {} ({:?}, alpha {:?})",
+            "GPU adapter: {} ({:?}, alpha {:?}, surface {:?}, canvas {:?})",
             adapter.get_info().name,
             adapter.get_info().backend,
-            alpha_mode
+            alpha_mode,
+            format,
+            canvas_texture_format(format)
         );
         self.alpha_mode = Some(alpha_mode);
         self.instance = Some(instance);
@@ -605,6 +608,141 @@ mod tests {
         );
         assert_eq!(surface_alpha_mode(&[Opaque, PreMultiplied]), PreMultiplied);
         assert_eq!(surface_alpha_mode(&[Opaque]), Auto);
+    }
+
+    #[test]
+    fn presents_srgb_canvas_values_unchanged_on_every_render_target() {
+        use std::sync::mpsc;
+
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            compatible_surface: None,
+            ..Default::default()
+        }));
+        let adapter = match adapter {
+            Ok(adapter) if adapter.get_info().device_type != wgpu::DeviceType::Cpu => adapter,
+            result => {
+                eprintln!("no hardware GPU adapter available: {result:?}");
+                return;
+            }
+        };
+        let Ok((device, queue)) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+        else {
+            eprintln!("GPU device unavailable");
+            return;
+        };
+        let input: Vec<[u8; 4]> = (0u8..=255)
+            .flat_map(|v| [[v, v, v, 255], [v, 255 - v, v ^ 0x55, 255]])
+            .collect();
+        let width = input.len() as u32;
+        let rgba: Vec<u8> = input.iter().flatten().copied().collect();
+        let extent = wgpu::Extent3d {
+            width,
+            height: 1,
+            depth_or_array_layers: 1,
+        };
+        let pitch = (width * 4).div_ceil(256) * 256;
+        let mut tested = 0;
+        for target_format in [
+            wgpu::TextureFormat::Bgra8UnormSrgb,
+            wgpu::TextureFormat::Bgra8Unorm,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            wgpu::TextureFormat::Rgba8Unorm,
+        ] {
+            let bgra = matches!(
+                target_format,
+                wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Bgra8Unorm
+            );
+            let texture = |label, format, usage| {
+                device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: extent,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage,
+                    view_formats: &[],
+                })
+            };
+            let source = texture(
+                "waypane-surface",
+                canvas_texture_format(target_format),
+                wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            );
+            queue.write_texture(
+                source.as_image_copy(),
+                &rgba,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width * 4),
+                    rows_per_image: Some(1),
+                },
+                extent,
+            );
+            let target = texture(
+                "waypane-target",
+                target_format,
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            );
+            let readback = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: u64::from(pitch),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let blitter = wgpu::util::TextureBlitter::new(&device, target_format);
+            let mut encoder = device.create_command_encoder(&Default::default());
+            blitter.copy(
+                &device,
+                &mut encoder,
+                &source.create_view(&Default::default()),
+                &target.create_view(&Default::default()),
+            );
+            encoder.copy_texture_to_buffer(
+                target.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &readback,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(pitch),
+                        rows_per_image: Some(1),
+                    },
+                },
+                extent,
+            );
+            queue.submit([encoder.finish()]);
+            let slice = readback.slice(..);
+            let (tx, rx) = mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |result| {
+                let _ = tx.send(result);
+            });
+            let _ = device.poll(wgpu::PollType::wait_indefinitely());
+            rx.recv().unwrap().unwrap();
+            let bytes = slice.get_mapped_range().unwrap();
+            for (index, (expected, actual)) in input
+                .iter()
+                .zip(bytes[..(width * 4) as usize].as_chunks::<4>().0)
+                .enumerate()
+            {
+                let actual = if bgra {
+                    [actual[2], actual[1], actual[0], actual[3]]
+                } else {
+                    [actual[0], actual[1], actual[2], actual[3]]
+                };
+                assert!(
+                    expected
+                        .iter()
+                        .zip(actual)
+                        .all(|(expected, actual)| expected.abs_diff(actual) <= 1),
+                    "{target_format:?} changed sRGB pixel {index}: {expected:?} -> {actual:?}"
+                );
+            }
+            tested += 1;
+        }
+        assert_eq!(tested, 4);
     }
 
     #[test]

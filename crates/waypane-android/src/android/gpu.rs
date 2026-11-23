@@ -9,7 +9,7 @@ use jni::refs::Global;
 use jni::Env;
 use raw_window_handle::{AndroidDisplayHandle, AndroidNdkWindowHandle};
 use waypane_core::{Rect, Size};
-use waypane_render::ViewportTransform;
+use waypane_render::{canvas_texture_format, ViewportTransform};
 
 use crate::{ActorHandle, AndroidCursor, AndroidSurface, SurfaceKey};
 
@@ -439,8 +439,19 @@ impl NativeSurface {
             ));
         }
 
+        let texture_format = canvas_texture_format(config.format);
+        let texture_format_changed = self
+            .config
+            .as_ref()
+            .is_some_and(|previous| canvas_texture_format(previous.format) != texture_format);
         self.config = Some(config);
         self.blitter = Some(blitter);
+        if texture_format_changed {
+            self.texture = None;
+            self.texture_size = Size::default();
+            self.texture_version = None;
+            self.cursor_texture = None;
+        }
         Ok(())
     }
 
@@ -464,6 +475,9 @@ impl NativeSurface {
         {
             return;
         }
+        let Some(config) = &self.config else {
+            return;
+        };
         let size = wgpu::Extent3d {
             width: cursor.size.width,
             height: cursor.size.height,
@@ -475,7 +489,7 @@ impl NativeSurface {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: canvas_texture_format(config.format),
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -508,6 +522,12 @@ impl NativeSurface {
             return Ok(RenderOutcome::Idle);
         }
         if self.texture_size != size {
+            let format = canvas_texture_format(
+                self.config
+                    .as_ref()
+                    .ok_or_else(|| "Android surface was not configured".to_string())?
+                    .format,
+            );
             self.texture = Some(device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("waypane-android-canvas"),
                 size: wgpu::Extent3d {
@@ -518,7 +538,7 @@ impl NativeSurface {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
+                format,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             }));
