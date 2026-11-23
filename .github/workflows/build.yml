@@ -114,15 +114,10 @@ jobs:
         run: |
           newer=$(python3 -c "import tomllib; m=tomllib.load(open('vendor/waypipe.upstream.toml','rb')); print(str(m['latest_commit'] != m['commit']).lower())")
           echo "has_latest=$newer" >> "$GITHUB_OUTPUT"
-      - name: Test wire protocol, SHM, files, and compression
-        env:
-          WAYPIPE_TEST_COMPRESSIONS: none,lz4,zstd
-        run: cargo test -p waypipe-client --locked --test upstream_shm -- --ignored --nocapture
       - name: Trace upstream file transfer with a debug peer (diagnostic)
         env:
           WAYPIPE_TEST_BINARY: ${{ github.workspace }}/target/upstream-debug/debug/waypipe
           WAYPIPE_TEST_COMPRESSIONS: zstd
-          WAYPIPE_TRACE_WIRE: "1"
           WAYPIPE_SHM_ROUNDS: "1"
         run: |
           cargo build \
@@ -133,20 +128,22 @@ jobs:
             --bin waypipe \
             --target-dir target/upstream-debug
           { echo 'WAYPIPE_VERSION<<EOF'; "$WAYPIPE_TEST_BINARY" --version; echo EOF; } >> "$GITHUB_ENV"
-          if cargo test -p waypipe-client --locked --test upstream_shm -- --ignored --nocapture > target/wire-sender.log 2>&1; then
-            tail -n 10 target/wire-sender.log
-          else
-            python3 - <<'PY'
+          cargo test -p waypipe-client --locked --test upstream_shm -- --ignored --nocapture > target/wire-sender.log 2>&1 && rc=0 || rc=$?
+          python3 - <<'PY'
           import re
           s = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", open("target/wire-sender.log", errors="replace").read())
           lines = s.splitlines()
-          keep = [l for l in lines if any(k in l for k in ("SHM_", "WIRE", "waypipe-server", "replication failed", "panicked", "remote SHM", "Traceback"))]
-          for l in keep[-90:]:
+          keep = [l for l in lines if re.search(r"(SHM_|replication|panicked|remote SHM|Traceback|diff|fill|shard|dirty|damage|commit|update|file|transfer|protocol|send|skip|unchanged)", l, re.I)]
+          for l in keep[-70:]:
               print(re.sub(r"^\S* \S*Z ", "", l)[:240])
-          raise SystemExit(1)
+          raise SystemExit(min(1, 0))
           PY
-          fi
+          exit $rc
 
+      - name: Test wire protocol, SHM, files, and compression
+        env:
+          WAYPIPE_TEST_COMPRESSIONS: none,lz4,zstd
+        run: cargo test -p waypipe-client --locked --test upstream_shm -- --ignored --nocapture
       - name: Test clipboard, text input, and toplevel protocols
         run: |
           cargo test -p waypane-core --locked \

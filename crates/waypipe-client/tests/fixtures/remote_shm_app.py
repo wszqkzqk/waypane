@@ -68,6 +68,14 @@ def bind(registry, name, interface, version, object_id):
     sock.sendall(message(registry, 0, payload))
 
 
+def present(surface, buffer_id):
+    # Waypipe mirrors shared memory on changes reported through a surface: a clean pool or an
+    # unattached buffer need not have its contents sent at all.
+    sock.sendall(message(surface, 1, struct.pack("<Iii", buffer_id, 0, 0)))
+    sock.sendall(message(surface, 2, struct.pack("<iiii", 0, 0, 4, 4)))
+    sock.sendall(message(surface, 6, b""))
+
+
 sock.sendall(message(1, 1, struct.pack("<I", 2)))
 sync(3)
 wait_for_done(3)
@@ -75,6 +83,8 @@ wait_for_done(3)
 bind(2, 2, "wl_shm", 1, 4)
 sync(5)
 wait_for_done(5)
+
+bind(2, 1, "wl_compositor", 4, 11)
 
 bind(2, 3, "wl_seat", 7, 12)
 sock.sendall(message(12, 1, struct.pack("<I", 13)))
@@ -103,13 +113,15 @@ with tempfile.TemporaryFile() as pool:
         [(socket.SOL_SOCKET, socket.SCM_RIGHTS, rights.tobytes())],
     )
     sock.sendall(message(6, 0, struct.pack("<IiiiiI", 7, 0, 4, 4, 16, 0)))
+    sock.sendall(message(11, 0, struct.pack("<I", 15)))
+    present(15, 7)
     sync(8)
     wait_for_done(8)
 
     pool.seek(4)
     pool.write(b"\xaa" * 8)
     pool.flush()
-    sock.sendall(message(6, 0, struct.pack("<IiiiiI", 9, 0, 4, 4, 16, 0)))
+    present(15, 7)
     sync(10)
     wait_for_done(10)
 

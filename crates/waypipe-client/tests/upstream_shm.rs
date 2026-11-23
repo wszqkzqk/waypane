@@ -45,6 +45,7 @@ impl Drop for TempRuntime {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Interface {
     Registry,
+    Compositor,
     Shm,
     Seat,
     Keyboard,
@@ -123,6 +124,9 @@ fn handle_messages(
             (Some(Interface::Registry), 0) => {
                 let id = bind_id(payload);
                 match bind_interface(payload).as_str() {
+                    "wl_compositor" => {
+                        objects.insert(id, Interface::Compositor);
+                    }
                     "wl_shm" => {
                         objects.insert(id, Interface::Shm);
                         push_plain(&mut output, message(id, 0, &0u32.to_le_bytes()));
@@ -174,20 +178,10 @@ fn serve(mut stream: UnixStream, compression: Compression) -> Result<(), String>
     let mut pool: Option<Rid> = None;
     let mut updates = 0usize;
     let mut buffer = [0u8; 8192];
-    let mut waiting_since: Option<Instant> = None;
+    let mut checked = false;
 
     loop {
-        if let Some(since) = waiting_since {
-            if since.elapsed() > Duration::from_secs(5) {
-                let resources = client.resources();
-                return Err(format!(
-                    "final sync arrived but pool {:?} was not fully transferred within 5s (ready={:?}, size={:?}, updates={updates})",
-                    pool,
-                    pool.and_then(|rid| resources.ready_for_protocol(rid).ok()),
-                    pool.and_then(|rid| resources.data(rid).map(<[u8]>::len)),
-                ));
-            }
-        } else if started.elapsed() > Duration::from_secs(20) {
+        if started.elapsed() > Duration::from_secs(20) {
             return Err("timed out waiting for waypipe traffic".to_string());
         }
         let read = match stream.read(&mut buffer) {
@@ -206,37 +200,37 @@ fn serve(mut stream: UnixStream, compression: Compression) -> Result<(), String>
         let batch = client
             .receive(&buffer[..read])
             .map_err(|error| error.to_string())?;
-        if !batch.outgoing.is_empty() {
-            stream
-                .write_all(&batch.outgoing)
-                .map_err(|error| error.to_string())?;
-        }
+        write_all(&mut stream, &batch.outgoing)?;
 
         for event in batch.events {
             match event {
                 ClientEvent::Closed => {
-                    return Err(format!(
-                        "waypipe sent Close before the pool contents were verified (waiting={})",
-                        waiting_since.is_some()
-                    ));
+                    return if checked {
+                        Ok(())
+                    } else {
+                        Err("waypipe sent Close before the final sync verified the pool"
+                            .to_string())
+                    };
                 }
                 ClientEvent::Protocol(messages) => {
                     // Final sync may share a Protocol frame with other messages. Previously a
-                    // messages.len() == 1 test silently skipped verification in that layout.
+                    // messages.len() == 1 test skipped verification entirely in that layout.
                     let final_sync = messages.iter().any(is_final_sync);
                     write_all(
                         &mut stream,
                         &handle_messages(&mut client, &messages, &mut objects)?,
                     )?;
                     stream.flush().map_err(|error| error.to_string())?;
-                    if final_sync && waiting_since.is_none() {
+                    if final_sync {
+                        // The fixture commits damaged buffers before syncing; like upstream, the
+                        // client applies earlier resource frames synchronously before protocol.
                         let Some(rid) = pool else {
                             return Err(
                                 "final sync arrived before a shared-memory pool".to_string()
                             );
                         };
                         verify_pool(&client, rid, updates)?;
-                        waiting_since = Some(Instant::now());
+                        checked = true;
                     }
                 }
                 ClientEvent::ShmOpened { rid, size } => {
@@ -249,9 +243,7 @@ fn serve(mut stream: UnixStream, compression: Compression) -> Result<(), String>
                 _ => {}
             }
         }
-        if waiting_since.is_some()
-            && verify_pool(&client, pool.expect("waiting needs a pool"), updates)?
-        {
+        if checked {
             println!("SHM_VERIFIED {compression:?}");
             return Ok(());
         }
@@ -262,15 +254,7 @@ fn is_final_sync(message: &waypipe_client::WaylandMessage) -> bool {
     message.object_id() == 1 && message.opcode() == 0 && read_u32(message.payload(), 0) == 10
 }
 
-/// Passes only once the whole pool has arrived; upstream may inject a rid before its fill.
-fn verify_pool(client: &Client, rid: Rid, updates: usize) -> Result<bool, String> {
-    if !client
-        .resources()
-        .ready_for_protocol(rid)
-        .map_err(|error| error.to_string())?
-    {
-        return Ok(false);
-    }
+fn verify_pool(client: &Client, rid: Rid, updates: usize) -> Result<(), String> {
     let mut expected: Vec<u8> = (0u8..=255).collect();
     expected[4..12].fill(0xaa);
     let actual = client
@@ -279,7 +263,7 @@ fn verify_pool(client: &Client, rid: Rid, updates: usize) -> Result<bool, String
         .ok_or_else(|| "pool disappeared".to_string())?;
     if actual != expected {
         return Err(format!(
-            "SHM mismatch when ready: len {}, bytes 0..16 {:?}, expected {:?}",
+            "SHM mismatch: len {}, bytes 0..16 {:?}, expected {:?}",
             actual.len(),
             &actual[..16],
             &expected[..16]
@@ -288,7 +272,7 @@ fn verify_pool(client: &Client, rid: Rid, updates: usize) -> Result<bool, String
     if updates == 0 {
         return Err("no shared-memory updates were received".to_string());
     }
-    Ok(true)
+    Ok(())
 }
 
 fn write_all(stream: &mut UnixStream, bytes: &[u8]) -> Result<(), String> {
