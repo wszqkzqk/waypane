@@ -49,6 +49,7 @@ enum Interface {
     Surface,
     Buffer,
     Shm,
+    ShmPool,
     Seat,
     Keyboard,
     Callback,
@@ -151,6 +152,9 @@ fn handle_messages(
                 }
             }
             (Some(Interface::Shm), 0) => {
+                objects.insert(read_u32(payload, 0), Interface::ShmPool);
+            }
+            (Some(Interface::ShmPool), 0) => {
                 let id = read_u32(payload, 0);
                 let offset = read_u32(payload, 4);
                 let (height, stride) = (read_u32(payload, 12), read_u32(payload, 16));
