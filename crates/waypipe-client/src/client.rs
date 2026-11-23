@@ -360,9 +360,9 @@ impl Client {
         let mut fields = Vec::new();
         if payload.len() >= 4 {
             let rid = crate::Rid(i32::from_le_bytes(payload[..4].try_into().unwrap()));
-            let complete = store.ready_for_protocol(rid).ok();
+            let exists = store.contains(rid);
             let size = store.data(rid).map(<[u8]>::len);
-            fields.push(format!("rid={} ready={complete:?} size={size:?}", rid.0));
+            fields.push(format!("rid={} exists={exists} size={size:?}", rid.0));
         }
         if payload.len() >= 12 {
             let a = u32::from_le_bytes(payload[4..8].try_into().unwrap());
