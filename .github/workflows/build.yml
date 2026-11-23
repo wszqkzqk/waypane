@@ -114,27 +114,21 @@ jobs:
         run: |
           newer=$(python3 -c "import tomllib; m=tomllib.load(open('vendor/waypipe.upstream.toml','rb')); print(str(m['latest_commit'] != m['commit']).lower())")
           echo "has_latest=$newer" >> "$GITHUB_OUTPUT"
-      - name: Trace upstream file transfer with a debug peer (diagnostic)
+      - name: Trace upstream file transfer with --trace upstream (diagnostic)
         env:
-          WAYPIPE_TEST_BINARY: ${{ github.workspace }}/target/upstream-debug/debug/waypipe
+          WAYPIPE_TEST_BINARY: ${{ github.workspace }}/target/upstream-waypipe/release/waypipe
           WAYPIPE_TEST_COMPRESSIONS: zstd
           WAYPIPE_SHM_ROUNDS: "1"
         run: |
-          cargo build \
-            --manifest-path vendor/waypipe/Cargo.toml \
-            --locked \
-            --no-default-features \
-            --features lz4,zstd \
-            --bin waypipe \
-            --target-dir target/upstream-debug
-          { echo 'WAYPIPE_VERSION<<EOF'; "$WAYPIPE_TEST_BINARY" --version; echo EOF; } >> "$GITHUB_ENV"
-          cargo test -p waypipe-client --locked --test upstream_shm -- --ignored --nocapture > target/wire-sender.log 2>&1 && rc=0 || rc=$?
+          printf '#!/bin/sh\nexec "%s" --trace "$@"\n' "$WAYPIPE_TEST_BINARY" > target/waypipe-trace
+          chmod +x target/waypipe-trace
+          export WAYPIPE_TEST_BINARY="$PWD/target/waypipe-trace"
+          cargo test -p waypipe-client --locked --test upstream_shm -- --ignored --nocapture > target/wire-upstream.log 2>&1 && rc=0 || rc=$?
           python3 - <<'PY'
           import re
-          s = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", open("target/wire-sender.log", errors="replace").read())
-          lines = s.splitlines()
-          keep = [l for l in lines if re.search(r"(SHM_|replication|panicked|remote SHM|Traceback|diff|fill|shard|dirty|damage|commit|update|file|transfer|protocol|send|skip|unchanged)", l, re.I)]
-          for l in keep[-70:]:
+          s = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", open("target/wire-upstream.log", errors="replace").read())
+          s = "".join(c if c in "\n\t" or ord(c) >= 32 else "" for c in s)
+          for l in s.splitlines()[-70:]:
               print(re.sub(r"^\S* \S*Z ", "", l)[:240])
           PY
           exit $rc
