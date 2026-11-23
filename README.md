@@ -126,6 +126,11 @@ If Android reclaims the process, reconnect the session.
 
 ## Downloads
 
+Pushing a `v*` tag publishes a [GitHub Release](https://github.com/wszqkzqk/waypane/releases)
+once all CI jobs pass, with `waypane-<version>-android-arm64.apk` (release-signed),
+`waypane-desktop-macos-arm64`, `waypane-desktop-windows-x64.exe`, and `SHA256SUMS`. Desktop
+binaries are not code-signed or notarized yet; macOS Gatekeeper and Windows SmartScreen may warn.
+
 Recent [CI runs](https://github.com/wszqkzqk/waypane/actions/workflows/build.yml) on `main` upload
 these artifacts:
 

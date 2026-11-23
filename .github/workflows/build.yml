@@ -210,3 +210,40 @@ jobs:
           path: apps/android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
           retention-days: 14
+
+  release:
+    name: GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [quality, desktop, upstream-interop, android]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          path: target/dist
+      - name: Assemble release assets
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          apk="waypane-${version}-android-arm64.apk"
+          cp target/dist/waypane-android-release-arm64/app-release.apk "$apk"
+          cp target/dist/waypane-desktop-macOS-ARM64/waypane-desktop waypane-desktop-macos-arm64
+          chmod 755 waypane-desktop-macos-arm64
+          cp target/dist/waypane-desktop-Windows-X64/waypane-desktop.exe waypane-desktop-windows-x64.exe
+          sha256sum "$apk" waypane-desktop-macos-arm64 waypane-desktop-windows-x64.exe > SHA256SUMS
+          ls -lh "$apk" waypane-desktop-macos-arm64 waypane-desktop-windows-x64.exe SHA256SUMS
+      - name: Publish GitHub Release
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          assets=("waypane-${version}-android-arm64.apk" waypane-desktop-macos-arm64 waypane-desktop-windows-x64.exe SHA256SUMS)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$TAG" "${assets[@]}" --verify-tag --title "Waypane $TAG" --generate-notes
+          fi
