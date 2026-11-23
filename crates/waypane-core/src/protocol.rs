@@ -172,12 +172,11 @@ pub struct DecodedRequest {
     pub args: Vec<Value>,
 }
 
-pub(crate) fn decode_request(
+pub(crate) fn request_method(
     message: &WaylandMessage,
     interface: &'static Interface,
     version: u32,
-    rids: &mut std::collections::VecDeque<Rid>,
-) -> Result<DecodedRequest> {
+) -> Result<&'static MessageDesc> {
     let opcode = message.opcode() as usize;
     let method = interface.requests.get(opcode).ok_or(Error::InvalidOpcode {
         object_id: message.object_id(),
@@ -192,11 +191,25 @@ pub(crate) fn decode_request(
         });
     }
 
-    let expected_fds = method
+    Ok(method)
+}
+
+pub(crate) fn fd_count(method: &MessageDesc) -> usize {
+    method
         .signature
         .iter()
         .filter(|arg| matches!(arg, ArgumentType::Fd))
-        .count();
+        .count()
+}
+
+pub(crate) fn decode_request(
+    message: &WaylandMessage,
+    interface: &'static Interface,
+    version: u32,
+    rids: &mut std::collections::VecDeque<Rid>,
+) -> Result<DecodedRequest> {
+    let method = request_method(message, interface, version)?;
+    let expected_fds = fd_count(method);
     if expected_fds > 0 && !message.has_file_descriptors() {
         return Err(Error::protocol(format!(
             "{}.{} requires {expected_fds} fd(s) but has no FD tag",
