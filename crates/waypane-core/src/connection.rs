@@ -85,6 +85,12 @@ impl Connection {
                 ClientEvent::Closed => events.push(CoreEvent::Closed),
             }
         }
+        if self.compositor.has_waiting_requests() {
+            // File-only traffic can unblock requests queued by an earlier protocol frame.
+            self.compositor
+                .process(&mut self.client, &[], &mut self.rids)?;
+            drain_events(&mut self.compositor, &mut events, &mut allocations)?;
+        }
         self.client.resources_mut().clear_damage();
         drain_events(&mut self.compositor, &mut events, &mut allocations)?;
         outgoing.extend_from_slice(&self.flush()?);
@@ -164,10 +170,12 @@ fn drain_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compositor::MAX_WAITING_REQUESTS;
     use crate::protocol::wayland as wl;
     use crate::state::ObjectRecord;
     use waypipe_client::{
-        encode_protocol_messages, encode_rids, ProtocolMessage, WAYPIPE_PROTOCOL_VERSION,
+        encode_frame, encode_protocol_messages, encode_rids, Compression, MessageType,
+        ProtocolMessage, WAYPIPE_PROTOCOL_VERSION,
     };
 
     fn header() -> [u8; 16] {
@@ -210,12 +218,17 @@ mod tests {
         assert_eq!(connection.compositor.pool_rid(100), Some(rid));
     }
 
-    fn prepare_file(connection: &mut Connection, rid: Rid) {
+    fn unfilled_file(connection: &mut Connection, rid: Rid) {
         connection
             .client_mut()
             .resources_mut()
             .open_file(rid, 4)
             .unwrap();
+    }
+
+    fn prepare_file(connection: &mut Connection, rid: Rid) {
+        unfilled_file(connection, rid);
+        fill_remote_file(connection, rid, &[0x5a; 4]);
     }
 
     fn create_pool(new_pool: u32, rid: Rid) -> ProtocolMessage {
@@ -273,5 +286,105 @@ mod tests {
             error.contains(&format!("{MAX_PENDING_INJECTED_RIDS} injected RIDs")),
             "{error}"
         );
+    }
+
+    fn fill_remote_file(connection: &mut Connection, rid: Rid, bytes: &[u8]) {
+        let mut payload = 0_u32.to_le_bytes().to_vec();
+        payload.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        payload.extend_from_slice(bytes);
+        connection
+            .client_mut()
+            .resources_mut()
+            .apply_fill(rid, &payload, Compression::None)
+            .unwrap();
+    }
+
+    fn create_pool_raw(new_pool: u32) -> Vec<u8> {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&2_u32.to_le_bytes());
+        raw.extend_from_slice(&(16_u32 << 16).to_le_bytes());
+        raw.extend_from_slice(&new_pool.to_le_bytes());
+        raw.extend_from_slice(&4_i32.to_le_bytes());
+        raw
+    }
+
+    fn sync_request(new_callback: u32) -> ProtocolMessage {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&1_u32.to_le_bytes());
+        raw.extend_from_slice(&(12_u32 << 16).to_le_bytes());
+        raw.extend_from_slice(&new_callback.to_le_bytes());
+        ProtocolMessage::new(Bytes::from(raw)).unwrap()
+    }
+
+    #[test]
+    fn protocol_waits_for_shm_content_in_order_across_receives() {
+        let mut connection = connection();
+        let (slow, ready) = (Rid(7), Rid(8));
+        unfilled_file(&mut connection, slow);
+        connection.receive(&encode_rids(&[slow]).unwrap()).unwrap();
+        prepare_file(&mut connection, ready);
+        fill_remote_file(&mut connection, ready, &[1, 2, 3, 4]);
+        connection.receive(&encode_rids(&[ready]).unwrap()).unwrap();
+
+        let protocol = [create_pool(100, slow), create_pool(101, ready)]
+            .into_iter()
+            .chain([sync_request(200)]);
+        let (frames, _) = encode_protocol_messages(&protocol.collect::<Vec<_>>()).unwrap();
+        connection.receive(&frames).unwrap();
+
+        assert_eq!(connection.compositor.pool_rid(100), None);
+        assert_eq!(
+            connection.compositor.pool_rid(101),
+            None,
+            "a ready request must not overtake earlier unrelated shared memory"
+        );
+        assert_eq!(connection.rids, [slow, ready]);
+
+        let mut payload = slow.0.to_le_bytes().to_vec();
+        payload.extend_from_slice(&0_u32.to_le_bytes());
+        payload.extend_from_slice(&4_u32.to_le_bytes());
+        payload.extend_from_slice(&[9, 8, 7, 6]);
+        let frame = encode_frame(MessageType::BufferFill, &payload).unwrap();
+        let split = frame.len() - 3;
+        connection.receive(&frame[..split]).unwrap();
+        assert_eq!(connection.compositor.pool_rid(100), None);
+        connection.receive(&frame[split..]).unwrap();
+
+        assert_eq!(connection.compositor.pool_rid(100), Some(slow));
+        assert_eq!(connection.compositor.pool_rid(101), Some(ready));
+        assert!(connection.rids.is_empty());
+        let store = connection.client().resources();
+        assert_eq!(store.data(slow).unwrap().to_vec(), vec![9, 8, 7, 6]);
+        assert_eq!(store.data(ready).unwrap().to_vec(), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn malformed_fd_requests_fail_instead_of_waiting() {
+        let mut missing = connection();
+        let (protocol, _) = encode_protocol_messages(&[create_pool(100, Rid(7))]).unwrap();
+        let error = missing.receive(&protocol).unwrap_err().to_string();
+        assert!(error.contains("missing RID"), "{error}");
+
+        let mut blocked = connection();
+        prepare_file(&mut blocked, Rid(7));
+        blocked.receive(&encode_rids(&[Rid(7)]).unwrap()).unwrap();
+        let untagged = ProtocolMessage::new(Bytes::from(create_pool_raw(100))).unwrap();
+        let (protocol, _) = encode_protocol_messages(&[untagged]).unwrap();
+        let error = blocked.receive(&protocol).unwrap_err().to_string();
+        assert!(error.contains("no FD tag"), "{error}");
+    }
+
+    #[test]
+    fn requests_waiting_for_shm_are_bounded() {
+        let mut connection = connection();
+        unfilled_file(&mut connection, Rid(7));
+        connection
+            .receive(&encode_rids(&[Rid(7)]).unwrap())
+            .unwrap();
+        let mut batch = vec![create_pool(100, Rid(7))];
+        batch.extend((1000..).take(MAX_WAITING_REQUESTS).map(sync_request));
+        let (frames, _) = encode_protocol_messages(&batch).unwrap();
+        let error = connection.receive(&frames).unwrap_err().to_string();
+        assert!(error.contains("too many Wayland requests"), "{error}");
     }
 }
