@@ -156,7 +156,7 @@ tasks.matching { it.name.startsWith("merge") && it.name.contains("JniLibFolders"
     .configureEach { dependsOn(rustBuild) }
 
 dependencies {
-    implementation(platform("androidx.compose:compose-bom:2026.09.00"))
+    implementation(platform("androidx.compose:compose-bom:2026.11.01"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
